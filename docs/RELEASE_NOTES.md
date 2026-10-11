@@ -23,6 +23,9 @@
 
 ## 0.1.82
 
+- Home and pins: choose any note as your Home and keep notes or folders close. Vault admins can also set a shared Home and pins for everyone.
+- Dashboards: open interactive HTML pages, start from an example, or save a dashboard link. Ask your agent to build the page from your notes, or update it with your installed Codex CLI.
+
 ## 0.1.78
 
 ## 0.1.77

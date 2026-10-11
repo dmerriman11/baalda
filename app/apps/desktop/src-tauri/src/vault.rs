@@ -26,7 +26,7 @@ pub const DENIED_DIRS: &[&str] = &["node_modules", "dist", "build", "target", "v
 /// this file and fails otherwise.
 pub const ALLOWED_EXTS: &[&str] = &[
     // notes / text
-    "md", "markdown", "mdx", "txt", "html", "htm", "canvas",
+    "md", "markdown", "mdx", "txt", "html", "htm", "canvas", "url", "webloc",
     // images
     "png", "jpg", "jpeg", "jfif", "gif", "webp", "svg", "bmp", "ico", "avif", "heic", "heif",
     "tiff", "tif",
@@ -44,7 +44,7 @@ pub const ALLOWED_EXTS: &[&str] = &[
 /// the md↔CRDT bridge. Everything else in `ALLOWED_EXTS` surfaces in the tree but
 /// syncs as an attachment. Mirrors `NOTE_EXTS` in `src/lib/formats.ts`,
 /// `src/lib/sync/registry.ts` and `src/lib/sync/inbound.ts` (same lockstep test).
-pub const NOTE_EXTS: &[&str] = &["md", "markdown", "mdx", "txt", "html", "htm", "canvas"];
+pub const NOTE_EXTS: &[&str] = &["md", "markdown", "mdx", "txt", "html", "htm", "canvas", "url", "webloc"];
 
 /// Name prefixes of the lock and owner files other apps leave NEXT TO a file
 /// they hold open (#265). They are not the user's files: Word, Excel and

@@ -1,3 +1,4 @@
+import type { TreeNode } from "./ipc";
 // Per-item accent colors for folders and notes, applied to the tree glyphs.
 //
 // On a SYNCED vault the color lives on the server row (`folders.color` /
@@ -177,4 +178,15 @@ export function markColorsAdopted(vaultPath: string): void {
   } catch {
     /* quota/unavailable — worst case we re-adopt next launch */
   }
+}
+
+/** Shared sidebar glyph colours, assigned per sibling group. */
+export function automaticTreeColors(userId: string, vaultIdentity: string, siblings: TreeNode[], docIds: Record<string, string>, explicit: Record<string, string>): Record<string, string> {
+  const assigned: Record<string, string> = {};
+  const walk = (nodes: TreeNode[]) => {
+    Object.assign(assigned, automaticItemColorAssignments(userId, vaultIdentity, nodes.filter((n) => n.isDir).map((n) => ({ key: n.path, identity: docIds[n.path] ?? n.path, explicitColorId: explicit[n.path] }))));
+    for (const node of nodes) if (node.children) walk(node.children);
+  };
+  walk(siblings);
+  return assigned;
 }

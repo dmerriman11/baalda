@@ -85,6 +85,35 @@ beforeEach(() => {
     noteRemoved: false,
     vault: null,
     tree: null,
+    titles: [],
+    syncEnabled: false,
+  });
+});
+
+describe("local indexed filesystem moves", () => {
+  it("follows an HTML identity across split watcher batches without following an identical copy", async () => {
+    useStore.setState({
+      vault: { path: "/synthetic/rename", name: "rename", epoch: 101 },
+      titles: [{ id: "home-id", path: "Home.html", title: "Home" }, { id: "copy-id", path: "Copy.html", title: "Copy" }],
+      openNote: { id: "home-id", path: "Home.html", title: "Home" },
+      openTabs: ["Home.html", "Copy.html"], personalHomeDocId: "home-id",
+      personalPins: [{ kind: "note", docId: "home-id" }],
+    });
+    await useStore.getState().patchTitles([{ path: "Home.html", kind: "removed" }]);
+    ipcMock.getNoteMeta.mockResolvedValueOnce({ id: "home-id", path: "Dashboard.html", title: "Dashboard" });
+    await useStore.getState().patchTitles([{ path: "Dashboard.html", kind: "modified" }]);
+    expect(useStore.getState().openNote?.path).toBe("Dashboard.html");
+    expect(useStore.getState().openTabs).toEqual(["Dashboard.html", "Copy.html"]);
+    expect(useStore.getState().personalHomeDocId).toBe("home-id");
+    expect(useStore.getState().personalPins).toEqual([{ kind: "note", docId: "home-id" }]);
+  });
+  it("leaves synced path following to the registry", async () => {
+    useStore.setState({ vault: { path: "/synthetic/synced", name: "synced", epoch: 102 }, syncEnabled: true,
+      titles: [{ id: "home-id", path: "Home.html", title: "Home" }],
+      openNote: { id: "home-id", path: "Home.html", title: "Home" }, openTabs: ["Home.html"] });
+    ipcMock.listNoteTitles.mockResolvedValueOnce([{ id: "home-id", path: "Dashboard.html", title: "Dashboard" }] as never);
+    await useStore.getState().refreshTitles();
+    expect(useStore.getState().openNote?.path).toBe("Home.html");
   });
 });
 

@@ -5,6 +5,7 @@
 use crate::index::Index;
 use crate::oauth::OauthResult;
 use crate::watcher::VaultWatcher;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
@@ -26,6 +27,9 @@ pub struct AppState {
     /// which it is (single-instance plugin) — a future "reload settings from
     /// disk" would have to clear this.
     pub config: Mutex<Option<crate::commands::AppConfig>>,
+    /// HTML view leases are issued to the host, never to the opaque guest.
+    /// Individual tokens prevent a late unmount from revoking a newer frame.
+    pub(crate) dashboard_views: Mutex<HashMap<String, crate::dashboard::DashboardViewLease>>,
 }
 
 #[derive(Default)]

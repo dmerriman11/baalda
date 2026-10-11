@@ -289,6 +289,24 @@ export async function rewriteDescendantPaths(
         AND rel_path LIKE $3 || '/%' ESCAPE '\\'`,
     [vaultId, newPath, prefix, from],
   );
+  // Shared folder pins follow the same move as the tree, including descendant
+  // pins. This runs under the structural operation's existing authorization
+  // and transaction, so a member moving their folder need not edit appearance.
+  await db.query(
+    `UPDATE vault_appearance a
+       SET settings = jsonb_set(a.settings, '{pinnedItems}', (
+         SELECT COALESCE(jsonb_agg(CASE
+           WHEN pin->>'kind' = 'folder' AND
+             (lower(pin->>'path') = lower($2) OR left(lower(pin->>'path'), length($2) + 1) = lower($2) || '/')
+           THEN jsonb_set(pin, '{path}', to_jsonb($3::text || substring(pin->>'path' FROM (length($2) + 1))))
+           ELSE pin END ORDER BY ordinal), '[]'::jsonb)
+         FROM jsonb_array_elements(a.settings->'pinnedItems') WITH ORDINALITY AS items(pin, ordinal)
+       )), updated_at = now()
+     WHERE a.organization_id = (SELECT organization_id FROM vaults WHERE id = $1)
+       AND jsonb_typeof(a.settings->'pinnedItems') = 'array'`,
+    [vaultId, oldPath, newPath],
+  );
+
 }
 
 export interface FolderRow {
@@ -391,11 +409,32 @@ export async function planFolderMove(
  * invariant: key by doc_id, never by path).
  */
 export async function moveFolder(
+  db: Queryable & Partial<Pick<pg.Pool, "connect">>,
+  folderId: string,
+  input: MoveFolderInput,
+): Promise<{ id: string; vaultId: string; name: string; path: string }> {
+  if (typeof db.connect === "function") {
+    const client = await db.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await moveFolderInTransaction(client, folderId, input);
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally { client.release(); }
+  }
+  return moveFolderInTransaction(db, folderId, input);
+}
+
+async function moveFolderInTransaction(
   db: Queryable,
   folderId: string,
   input: MoveFolderInput,
 ): Promise<{ id: string; vaultId: string; name: string; path: string }> {
-  const folder = await findFolder(db, folderId);
+  const { rows } = await db.query<FolderRow>("SELECT id, vault_id, parent_id, name, path FROM folders WHERE id = $1 FOR UPDATE", [folderId]);
+  const folder = rows[0] ?? null;
   if (!folder) throw new TreeOpError("Unknown folder");
 
   const oldPath = folder.path;

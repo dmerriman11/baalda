@@ -4,7 +4,7 @@ import { recordingAppDeps } from "./helpers/app.js";
 import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
 import { authHeaders, createOrg, signUp, type TestUser } from "./helpers/auth.js";
-import { seedMember, seedVault } from "./helpers/seed.js";
+import { seedMember, seedVault, seedFolder, seedVaultGrant } from "./helpers/seed.js";
 import {
   setAppearanceChangedPublisher,
   type AppearanceChangedFields,
@@ -120,6 +120,46 @@ describe("vault appearance", () => {
         change: { orgId, settings: { theme: "light", lineNumbers: false }, updatedAt: body.updatedAt },
       },
     ]);
+  });
+
+  it("PATCH preserves unrelated appearance and concurrent pin toggles", async () => {
+    const { owner, member, orgId } = await setup();
+    await put(owner, orgId, { theme: "dark" });
+    const patch = (caller: TestUser, body: unknown) => app.request(`/api/orgs/${orgId}/appearance`, { method: "PATCH", headers: { ...authHeaders(caller), "content-type": "application/json" }, body: JSON.stringify(body) });
+    const responses = await Promise.all([
+      patch(owner, { togglePin: { kind: "note", docId: "first" } }),
+      patch(owner, { togglePin: { kind: "note", docId: "second" } }),
+      patch(owner, { settings: { homeDocId: "home" } }),
+    ]);
+    expect(responses.map((response) => response.status)).toEqual([200, 200, 200]);
+    const saved = await (await get(owner, orgId)).json() as { settings: { pinnedItems: unknown[]; theme: string; homeDocId: string } };
+    expect(saved.settings.theme).toBe("dark");
+    expect(saved.settings.homeDocId).toBe("home");
+    expect(saved.settings.pinnedItems).toHaveLength(2);
+    expect(saved.settings.pinnedItems).toEqual(expect.arrayContaining([{ kind: "note", docId: "first" }, { kind: "note", docId: "second" }]));
+    expect((await patch(member, { togglePin: { kind: "note", docId: "third" } })).status).toBe(403);
+    expect((await patch(owner, { togglePin: { kind: "note", docId: "first" } })).status).toBe(200);
+    expect((await (await get(owner, orgId)).json() as typeof saved).settings.pinnedItems).toEqual([{ kind: "note", docId: "second" }]);
+  });
+
+  it("folder moves atomically follow shared pins, including descendants and concurrent unpin", async () => {
+    const { owner, orgId, vaultId } = await setup();
+    await seedVaultGrant(orgId, "edit");
+    const folderId = await seedFolder(vaultId, null, "Projects", "Projects");
+    await seedFolder(vaultId, folderId, "Active", "Projects/Active");
+    await put(owner, orgId, { theme: "dark", pinnedItems: [{ kind: "folder", path: "Projects" }, { kind: "folder", path: "Projects/Active" }, { kind: "note", docId: "stable-note" }] });
+    const [pin, move] = await Promise.all([
+      app.request(`/api/orgs/${orgId}/appearance`, { method: "PATCH", headers: { ...authHeaders(owner), "content-type": "application/json" }, body: JSON.stringify({ togglePin: { kind: "folder", path: "Projects" } }) }),
+      app.request(`/api/folders/${folderId}`, { method: "PATCH", headers: { ...authHeaders(owner), "content-type": "application/json" }, body: JSON.stringify({ path: "Work" }) }),
+    ]);
+    expect(move.status).toBe(200);
+    expect([200, 404]).toContain(pin.status);
+    const saved = await (await get(owner, orgId)).json() as { settings: { pinnedItems: { kind: string; path?: string; docId?: string }[]; theme: string } };
+    expect(saved.settings.theme).toBe("dark");
+    expect(saved.settings.pinnedItems).toContainEqual({ kind: "folder", path: "Work/Active" });
+    expect(saved.settings.pinnedItems).toContainEqual({ kind: "note", docId: "stable-note" });
+    expect(saved.settings.pinnedItems.some((item) => item.path?.startsWith("Projects"))).toBe(false);
+    expect(saved.settings.pinnedItems.some((item) => item.path === "Work")).toBe(pin.status === 404);
   });
 
   it("the pubsub frame round-trips", () => {

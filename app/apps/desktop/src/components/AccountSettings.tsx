@@ -23,6 +23,8 @@ import {
   PROFILE_IMAGE_PX,
 } from "../lib/profileAvatar";
 import { imageFileToSquareDataUrl } from "../lib/squareImage";
+import { RemoteDashboardSettings } from "./RemoteDashboardView";
+import { InstalledAgentsStatus } from "./DashboardAgentRunner";
 import { AccountPlanTab } from "./AccountPlanTab";
 import { AccountVaultsTab } from "./AccountVaultsTab";
 import { Avatar } from "./Avatar";
@@ -754,6 +756,9 @@ function AboutTab({ onClose }: { onClose: () => void }) {
           </button>
         )}
       </div>
+
+      <InstalledAgentsStatus />
+      <RemoteDashboardSettings />
 
       <div className="menu-sep" />
       <button

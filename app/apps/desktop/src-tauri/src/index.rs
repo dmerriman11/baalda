@@ -3,7 +3,7 @@
 //!
 //! Identity rule: notes are keyed by `doc_id` (a UUID), never by path. The
 //! open-time `rebuild` reconciles against the `.md` files incrementally,
-//! preserving existing ids by matching on path, so reopening a vault never
+//! preserving existing ids by matching on path or reliable filesystem identity, so reopening a vault never
 //! forks a note's identity. On rename we update the path column by id, so
 //! inbound links (which store `dst_note_id`) never break.
 
@@ -21,6 +21,9 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use uuid::Uuid;
 use walkdir::WalkDir;
+
+#[path = "note_file_identity.rs"]
+mod note_file_identity;
 
 /// Which derivation a note-family file gets.
 ///
@@ -159,6 +162,10 @@ pub struct Index {
     #[cfg(test)]
     folder_writes: std::cell::Cell<usize>,
 }
+
+#[path = "dashboard_query.rs"]
+mod dashboard_query;
+pub use dashboard_query::{DashboardNote, NoteQuery, NoteSort, PropertyFilter};
 
 /// One search hit, from EITHER tier. `kind` is what tells the panel whether
 /// `id` is a note doc_id or a `files.id`, and whether to badge the row.
@@ -344,6 +351,16 @@ impl Index {
                 sha256       TEXT,
                 frontmatter  TEXT
             );
+
+            -- Kept after removal: native watchers may report the two halves of
+            -- a rename in separate batches, or the app may have been closed.
+            CREATE TABLE IF NOT EXISTS note_file_identity (
+                doc_id TEXT PRIMARY KEY,
+                path TEXT NOT NULL,
+                file_id TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS note_file_identity_lookup
+                ON note_file_identity(file_id);
 
             -- Spec 02 §3 describes a contentless FTS5 table, but SQLite's
             -- contentless (content='') tables cannot serve snippet()/highlight(),
@@ -737,7 +754,9 @@ impl Index {
 
             match indexed.get(&rel) {
                 // Unchanged since the last index — skip the read + parse.
-                Some((_, mtime, _)) if *mtime == disk_mtime => {}
+                Some((id, mtime, _)) if *mtime == disk_mtime => {
+                    Self::remember_file_identity(&tx, id, &rel, abs)?;
+                }
                 // Changed — re-index in place, preserving the doc_id. A file
                 // whose mtime moved but whose bytes did not comes back
                 // `Unchanged` from the hash gate, and then it has touched no
@@ -765,7 +784,9 @@ impl Index {
 
         // Drop notes whose files are gone from disk.
         for (path, (id, _, rowid)) in &indexed {
-            if !seen_notes.contains(path) {
+            // A new path may already have claimed this ID by filesystem
+            // identity. Never delete that relocated row from the old snapshot.
+            if !seen_notes.contains(path) && self.id_for_path(&tx, path)?.as_ref() == Some(id) {
                 Self::delete_note_rows(&tx, id, *rowid)?;
                 notes_changed = true;
                 stale += 1;
@@ -1278,6 +1299,7 @@ impl Index {
                 "UPDATE notes SET path = ?1 WHERE id = ?2",
                 params![new_rel, id],
             )?;
+            Self::remember_file_identity(&tx, &id, &new_rel, new_abs)?;
         }
 
         // Folder move: rewrite the path prefix of every descendant note, keeping
@@ -1297,6 +1319,7 @@ impl Index {
                 "UPDATE notes SET path = ?1 WHERE id = ?2",
                 params![new_path, id],
             )?;
+            Self::remember_file_identity(&tx, &id, &new_path, &vault.join(&new_path))?;
         }
 
         // Re-resolve links (a file rename can change the basename used to
@@ -1313,9 +1336,8 @@ impl Index {
     ///
     /// The counterpart to [`Self::rename_note`] for a rename this app did NOT
     /// perform. When a file is renamed from outside (Finder, a script, an AI),
-    /// the watcher sees an unrelated `removed` + `modified` pair: the old row is
-    /// dropped and the new file is indexed under a FRESH `Uuid::new_v4()`
-    /// (`index_notes` reuses an id only via `id_for_path`). The sync layer pairs
+    /// the watcher sees a `removed` + `modified` pair. Filesystem identity now
+    /// preserves local renames when available; the sync layer additionally pairs
     /// the two halves by content hash and repairs the server mapping — this is
     /// the local half, without which the same file carries one doc_id in
     /// `.context/config.json` and another in the index, and the next thing to
@@ -1344,6 +1366,11 @@ impl Index {
         }
         tx.execute(
             "UPDATE notes SET id = ?1 WHERE id = ?2",
+            params![doc_id, current],
+        )?;
+        tx.execute("DELETE FROM note_file_identity WHERE doc_id = ?1", params![doc_id])?;
+        tx.execute(
+            "UPDATE note_file_identity SET doc_id = ?1 WHERE doc_id = ?2",
             params![doc_id, current],
         )?;
         tx.execute(
@@ -1436,6 +1463,10 @@ impl Index {
         reuse_id: Option<String>,
     ) -> AppResult<IndexedNote> {
         let rel = rel_from_abs(vault, abs)?;
+        let reuse_id = match reuse_id {
+            Some(id) => Some(id),
+            None => Self::id_for_external_move(tx, vault, abs)?,
+        };
         let stem = abs
             .file_stem()
             .and_then(|s| s.to_str())
@@ -1463,7 +1494,11 @@ impl Index {
                 size as f64 / (1024.0 * 1024.0),
                 MAX_INDEX_BYTES / (1024 * 1024)
             );
-            return self.index_oversized(tx, &rel, stem, mtime, reuse_id);
+            let result = self.index_oversized(tx, &rel, stem, mtime, reuse_id)?;
+            if let IndexedNote::Indexed(id) = &result {
+                Self::remember_file_identity(tx, id, &rel, abs)?;
+            }
+            return Ok(result);
         }
 
         let content = std::fs::read_to_string(abs)?;
@@ -1480,6 +1515,7 @@ impl Index {
                             params![mtime, id],
                         )?;
                     }
+                    Self::remember_file_identity(tx, id, &rel, abs)?;
                     return Ok(IndexedNote::Unchanged);
                 }
             }
@@ -1538,6 +1574,7 @@ impl Index {
             )?;
         }
 
+        Self::remember_file_identity(tx, &id, &rel, abs)?;
         Ok(IndexedNote::Indexed(id))
     }
 
@@ -1733,6 +1770,44 @@ impl Index {
                 r.get::<_, String>(0)
             })
             .optional()?)
+    }
+
+    fn remember_file_identity(tx: &Connection, id: &str, rel: &str, abs: &Path) -> AppResult<()> {
+        if let Some(file_id) = note_file_identity::identity(abs) {
+            tx.execute(
+                "INSERT INTO note_file_identity(doc_id, path, file_id) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(doc_id) DO UPDATE SET path=excluded.path, file_id=excluded.file_id
+                 WHERE path != excluded.path OR file_id != excluded.file_id",
+                params![id, rel, file_id],
+            )?;
+        } else {
+            // Do not retain stale identity after an atomic replacement on a
+            // filesystem that no longer provides a reliable creation time.
+            tx.execute("DELETE FROM note_file_identity WHERE doc_id = ?1", params![id])?;
+        }
+        Ok(())
+    }
+
+    fn id_for_external_move(tx: &Connection, vault: &Path, abs: &Path) -> AppResult<Option<String>> {
+        let Some(file_id) = note_file_identity::identity(abs) else { return Ok(None) };
+        let candidates: Vec<(String, String)> = {
+            let mut stmt = tx.prepare(
+                "SELECT i.doc_id, COALESCE(n.path, i.path) FROM note_file_identity i
+                 LEFT JOIN notes n ON n.id = i.doc_id WHERE i.file_id = ?1 LIMIT 2",
+            )?;
+            let rows = stmt.query_map(params![file_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        // Hard links may share an identity. Never collapse ambiguous owners,
+        // and never adopt a copy while the old path still exists (any kind).
+        if let [(id, previous)] = candidates.as_slice() {
+            if std::fs::symlink_metadata(vault.join(previous))
+                .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+            {
+                return Ok(Some(id.clone()));
+            }
+        }
+        Ok(None)
     }
 
     fn row_for_path(&self, tx: &Connection, rel: &str) -> AppResult<Option<(String, i64)>> {
@@ -2578,6 +2653,11 @@ impl Index {
         }
         tx.execute(
             "UPDATE notes SET id = ?1 WHERE id = ?2",
+            params![doc_id, current],
+        )?;
+        tx.execute("DELETE FROM note_file_identity WHERE doc_id = ?1", params![doc_id])?;
+        tx.execute(
+            "UPDATE note_file_identity SET doc_id = ?1 WHERE doc_id = ?2",
             params![doc_id, current],
         )?;
         tx.execute(
@@ -4058,8 +4138,8 @@ mod tests {
         );
     }
 
-    /// The gate is per PATH, not per content: a copy (or an external rename into
-    /// a new name) has no row of its own, so it is indexed even though some other
+    /// The gate is per PATH, not per content: a copy has no row of its own,
+    /// so it is indexed even though some other
     /// note holds exactly the same bytes.
     #[test]
     fn identical_bytes_at_a_new_path_are_indexed_not_unchanged() {
@@ -4087,6 +4167,105 @@ mod tests {
             .collect();
         assert_eq!(ids.len(), 2);
         assert_ne!(ids[0], ids[1], "the copy gets its own doc_id");
+    }
+
+    #[test]
+    fn external_html_rename_preserves_id_in_split_watcher_batches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path();
+        write_note(v, "Home.html", "<h1>My dashboard</h1>").unwrap();
+        assert!(note_file_identity::identity(&v.join("Home.html")).is_some());
+        let idx = Index::open(v).unwrap();
+        idx.index_note(v, &v.join("Home.html")).unwrap();
+        let id = idx.id_for_path(&idx.conn, "Home.html").unwrap().unwrap();
+        std::fs::rename(v.join("Home.html"), v.join("Dashboard.html")).unwrap();
+        idx.remove_notes(v, &[v.join("Home.html")]).unwrap();
+        drop(idx);
+        let idx = Index::open(v).unwrap();
+        idx.index_note(v, &v.join("Dashboard.html")).unwrap();
+        assert_eq!(idx.id_for_path(&idx.conn, "Dashboard.html").unwrap(), Some(id.clone()));
+        assert!(idx.id_for_path(&idx.conn, "Home.html").unwrap().is_none());
+        std::fs::copy(v.join("Dashboard.html"), v.join("Copy.html")).unwrap();
+        idx.index_note(v, &v.join("Copy.html")).unwrap();
+        assert_ne!(idx.id_for_path(&idx.conn, "Copy.html").unwrap(), Some(id));
+    }
+
+    #[test]
+    fn external_html_rename_rebuild_preserves_id_and_does_not_delete_adopted_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path();
+        write_note(v, "Home.html", "<h1>Home</h1>").unwrap();
+        let idx = Index::open(v).unwrap();
+        idx.rebuild(v).unwrap();
+        let id = idx.id_for_path(&idx.conn, "Home.html").unwrap().unwrap();
+        drop(idx);
+        std::fs::create_dir(v.join("Dashboards")).unwrap();
+        std::fs::rename(v.join("Home.html"), v.join("Dashboards/Dashboard.html")).unwrap();
+        let idx = Index::open(v).unwrap();
+        idx.rebuild(v).unwrap();
+        assert_eq!(idx.id_for_path(&idx.conn, "Dashboards/Dashboard.html").unwrap(), Some(id));
+        assert_eq!(idx.conn.query_row("SELECT count(*) FROM notes", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+    }
+
+    #[test]
+    fn external_html_rename_same_watcher_batch_and_atomic_replacement_preserve_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path();
+        write_note(v, "Home.html", "<h1>Home</h1>").unwrap();
+        let idx = Index::open(v).unwrap();
+        idx.index_note(v, &v.join("Home.html")).unwrap();
+        let id = idx.id_for_path(&idx.conn, "Home.html").unwrap().unwrap();
+        // Atomic saves change the inode; the hash gate must refresh identity.
+        write_note(v, "Replacement.html", "<h1>Home</h1>").unwrap();
+        std::fs::rename(v.join("Replacement.html"), v.join("Home.html")).unwrap();
+        idx.index_note(v, &v.join("Home.html")).unwrap();
+        std::fs::rename(v.join("Home.html"), v.join("Dashboard.html")).unwrap();
+        idx.index_note(v, &v.join("Dashboard.html")).unwrap();
+        idx.remove_notes(v, &[v.join("Home.html")]).unwrap();
+        assert_eq!(idx.id_for_path(&idx.conn, "Dashboard.html").unwrap(), Some(id));
+    }
+
+    #[test]
+    fn filesystem_identity_does_not_merge_hard_link_owners_or_recycled_ids() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path();
+        write_note(v, "Home.html", "<h1>Home</h1>").unwrap();
+        let idx = Index::open(v).unwrap();
+        idx.index_note(v, &v.join("Home.html")).unwrap();
+        let id = idx.id_for_path(&idx.conn, "Home.html").unwrap().unwrap();
+        std::fs::hard_link(v.join("Home.html"), v.join("Link.html")).unwrap();
+        idx.index_note(v, &v.join("Link.html")).unwrap();
+        assert_ne!(idx.id_for_path(&idx.conn, "Link.html").unwrap(), Some(id.clone()));
+        std::fs::rename(v.join("Home.html"), v.join("Dashboard.html")).unwrap();
+        assert!(Index::id_for_external_move(&idx.conn, v, &v.join("Dashboard.html")).unwrap().is_none());
+        // Creation time is part of the lookup, even if an inode is recycled.
+        idx.conn.execute("UPDATE note_file_identity SET file_id = file_id || ':old-birth-time'", []).unwrap();
+        assert!(Index::id_for_external_move(&idx.conn, v, &v.join("Dashboard.html")).unwrap().is_none());
+    }
+
+    #[test]
+    fn filesystem_identity_tracks_app_folder_moves_and_authoritative_rebinds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let v = tmp.path();
+        write_note(v, "Original/Home.html", "<h1>Home</h1>").unwrap();
+        let idx = Index::open(v).unwrap();
+        idx.rebuild(v).unwrap();
+        std::fs::rename(v.join("Original"), v.join("Moved")).unwrap();
+        idx.rename_note(v, &v.join("Original"), &v.join("Moved")).unwrap();
+        let original = idx.id_for_path(&idx.conn, "Moved/Home.html").unwrap().unwrap();
+        // A bootstrap's ID remap must carry the identity tombstone with it.
+        let server_id = Uuid::new_v4().to_string();
+        assert_eq!(idx.commit_materialized(v, &[("Moved/Home.html".into(), Some(server_id.clone()))]).unwrap(), vec![true]);
+        assert_ne!(original, server_id);
+        let stored: (String, String) = idx.conn.query_row("SELECT doc_id, path FROM note_file_identity", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(stored, (server_id.clone(), "Moved/Home.html".into()));
+        // External rename after the in-app move, with deletion delivered first.
+        std::fs::rename(v.join("Moved/Home.html"), v.join("Moved/Dashboard.html")).unwrap();
+        idx.remove_note(v, &v.join("Moved/Home.html")).unwrap();
+        drop(idx);
+        let idx = Index::open(v).unwrap();
+        idx.rebuild(v).unwrap();
+        assert_eq!(idx.id_for_path(&idx.conn, "Moved/Dashboard.html").unwrap(), Some(server_id));
     }
 
     #[test]
@@ -4226,8 +4405,8 @@ mod tests {
         assert_eq!(dangling, 1);
     }
 
-    /// An out-of-app rename: the watcher drops the old row and indexes the new
-    /// file under a fresh uuid, so the sync layer has to put the registry's
+    /// An out-of-app rename on a filesystem without stable identity: the
+    /// watcher indexes a fresh uuid, so sync must put the registry's
     /// doc_id back onto the row. Backlinks must survive the re-key.
     #[test]
     fn rebind_note_id_rekeys_a_row_and_keeps_backlinks() {
@@ -4236,6 +4415,10 @@ mod tests {
         idx.rebuild(&v).unwrap();
 
         let beta_id = idx.get_note_meta("sub/Beta.md").unwrap().unwrap().id;
+
+        // Simulate unsupported filesystem identity so this still exercises
+        // the existing sync repair fallback rather than the local rename path.
+        idx.conn.execute("DELETE FROM note_file_identity WHERE doc_id = ?1", params![beta_id]).unwrap();
 
         // Finder renames the file: the watcher removes the old row and indexes
         // the new path as a brand-new note.
@@ -4250,6 +4433,7 @@ mod tests {
             idx.get_note_meta("sub/Renamed.md").unwrap().unwrap().id,
             beta_id
         );
+        assert_eq!(idx.conn.query_row("SELECT doc_id FROM note_file_identity WHERE path = 'sub/Renamed.md'", [], |r| r.get::<_, String>(0)).unwrap(), beta_id);
         // Alpha's [[Beta]] resolves by title, so it points at the note's ORIGINAL
         // doc_id again — which is the whole reason identity has to survive.
         let alpha = idx.get_note_meta("Alpha.md").unwrap().unwrap();

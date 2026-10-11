@@ -1,0 +1,25 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: Apache-2.0
+How to edit this dashboard
+Baalda renders; it never generates. Replace these clearly labeled examples using
+notes you can read. Keep Markdown as the source of truth. Do not add a JSON export.
+This file syncs and shares as an ordinary note. Use MCP read_note/search_notes and
+update_note/edit_note, or edit this file on disk. Preserve its doc_id through moves.
+Optional API: include <script src="/__baalda/sdk.js"></script>; await baalda.ready.
+baalda.vault.info(), vault.stats(); notes.search(q,limit), notes.list({folder,tag,
+property:{key,value},modifiedSince,sort,limit}), notes.read({docId}|{path}),
+notes.meta({docId}|{path}), notes.backlinks({docId}|{path}); graph.edges(); tags.list();
+properties.keys(), values(key); state.get(key), state.set(key,value); app.open({path}|{docId}),
+app.openExternal(httpsUrl). List sort: path/title/modified-desc/modified-asc.
+modifiedSince is Unix seconds. Frontmatter is a JSON string. The bridge is read-only.
+Opaque sandbox: no localStorage, Tauri IPC, nested frames, forms or fetch/XHR/WS.
+Allowed script CDNs: cdnjs.cloudflare.com, cdn.jsdelivr.net, unpkg.com.
+Keep scripts/styles inline or on those CDNs; use ./attachments/ for local images.
+Theme CSS: --bg, --fg, --surface, --muted, --accent, --accent-soft, --border.
+Live queries are optional. Render exactly what the user asked for.
+
+Starter prompt: Build a reading list from my book and article notes, with authors, reading status, and useful takeaways.
+-->
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Reading list</title>
+<style>*{box-sizing:border-box}body{margin:0;padding:clamp(20px,5vw,64px);background:var(--bg,#faf9f8);color:var(--fg,#1a1a1e);font:15px/1.6 system-ui,sans-serif}main{max-width:1100px;margin:auto}header{margin-bottom:32px}h1{font-size:clamp(30px,5vw,48px);line-height:1.15;letter-spacing:-.04em;margin:10px 0}p{color:var(--muted,#6b6b76)}.eyebrow{font-size:12px;text-transform:uppercase;letter-spacing:.12em;color:var(--accent,#7f73ff)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px}article{padding:24px;background:var(--surface,#fff);border:1px solid var(--border,#e8e7e5);border-radius:18px}h2{font-size:18px;margin-top:0}.example{padding:12px;background:var(--accent-soft,#efedff);border-radius:10px}footer{margin-top:32px;color:var(--muted,#6b6b76);font-size:13px}button{font:inherit;color:var(--fg,#1a1a1e);background:var(--surface,#fff);border:1px solid var(--border,#e8e7e5);border-radius:20px;padding:8px 14px;cursor:pointer}.detail[hidden]{display:none}</style><script src="/__baalda/sdk.js"></script></head>
+<body><main><header><div class="eyebrow">Your Baalda home</div><h1>Reading list</h1><p>Keep ideas close</p></header><section class="grid"><article><h2>Reading</h2><p class="example">Example book · notes and questions</p><button type="button" onclick="this.nextElementSibling.hidden=!this.nextElementSibling.hidden">Details</button><p class="detail" hidden>This is example content. Ask your agent to replace it with information from your notes.</p></article><article><h2>To read</h2><p class="example">Example article · why it matters</p><button type="button" onclick="this.nextElementSibling.hidden=!this.nextElementSibling.hidden">Details</button><p class="detail" hidden>This is example content. Ask your agent to replace it with information from your notes.</p></article><article><h2>Finished</h2><p class="example">Example book · one idea to remember</p><button type="button" onclick="this.nextElementSibling.hidden=!this.nextElementSibling.hidden">Details</button><p class="detail" hidden>This is example content. Ask your agent to replace it with information from your notes.</p></article></section><footer>Example dashboard · Ask your agent to make it yours. Your notes remain the source of truth.</footer></main></body></html>

@@ -1,0 +1,21 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+.dashboard-agent-launch { white-space: nowrap; }
+.dashboard-agent-backdrop { position: fixed; inset: 0; z-index: 1050; display: flex; align-items: center; justify-content: center; padding: 48px 20px 20px; background: rgb(0 0 0 / 30%); }
+.dashboard-agent-dialog { width: min(560px, 100%); max-height: calc(100dvh - 76px); overflow: auto; box-sizing: border-box; padding: 24px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-surface); color: var(--text-primary); box-shadow: 0 16px 48px rgb(0 0 0 / 18%); }
+.dashboard-agent-heading { display: flex; align-items: center; gap: 12px; justify-content: space-between; }
+.dashboard-agent-heading h2 { margin: 0; font-size: 18px; }
+.dashboard-agent-heading button { flex: none; font-size: 22px; line-height: 1; }
+.dashboard-agent-description { color: var(--text-secondary); font-size: 12px; line-height: 1.6; }
+.dashboard-agent-path { padding: 8px 10px; margin: 12px 0; background: var(--bg-subtle); border-radius: 6px; font-size: 12px; overflow-wrap: anywhere; }
+.dashboard-agent-dialog label { display: block; font-size: 13px; margin: 16px 0 8px; }
+.dashboard-agent-dialog textarea { display: block; box-sizing: border-box; width: 100%; resize: vertical; min-height: 96px; padding: 10px; color: var(--text-primary); background: var(--bg-app); border: 1px solid var(--border); border-radius: 6px; font: inherit; }
+.dashboard-agent-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-top: 12px; }
+.dashboard-agent-actions span { color: var(--text-secondary); font-size: 11px; }
+.dashboard-agent-status { font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.dashboard-agent-output { max-height: 220px; overflow: auto; padding: 12px; border-radius: 6px; background: var(--bg-subtle); font-size: 11px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.installed-agents-status { margin-top: 20px; }
+.installed-agents-status h3 { font-size: 13px; margin-bottom: 10px; }
+.installed-agent-row { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-bottom: 12px; font-size: 12px; }
+.installed-agent-row span { color: var(--text-secondary); overflow-wrap: anywhere; }
+.installed-agent-row p { width: 100%; margin: 0; color: var(--text-secondary); line-height: 1.5; }
+@media (max-width: 480px) { .dashboard-agent-backdrop { padding-inline: 10px; } .dashboard-agent-dialog { padding: 16px; } }

@@ -663,7 +663,7 @@ function samePathConflictCap(listed: number): number {
  *  list and the ones in `inbound.ts` and Rust `vault.rs` are what
  *  `__tests__/formatsLockstep.test.ts` compares against the registry, and a
  *  list that imports its own answer cannot drift — nor can it detect drift. */
-const NOTE_EXTS = ["md", "markdown", "mdx", "txt", "html", "htm", "canvas"];
+const NOTE_EXTS = ["md", "markdown", "mdx", "txt", "html", "htm", "canvas", "url", "webloc"];
 function isNoteFile(path: string): boolean {
   const ext = path.slice(path.lastIndexOf(".") + 1).toLowerCase();
   return path.includes(".") && NOTE_EXTS.includes(ext);

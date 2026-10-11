@@ -26,6 +26,8 @@ import { SilentBoundary } from "./components/SilentBoundary";
 import { BacklinksPanel } from "./components/BacklinksPanel";
 import { EditorEmpty, EditorSkeleton } from "./components/EditorPlaceholders";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { HomeDashboardDialog } from "./components/HomeDashboardDialog";
+import { HomePicker, PinnedSection } from "./components/HomeNavigation";
 import { FileTree } from "./components/FileTree";
 import { SyncBadge, syncBadgeHold } from "./components/Identity";
 import { SearchPanel } from "./components/SearchPanel";
@@ -72,6 +74,7 @@ import { setUpdateHintHandler } from "./lib/updateHint";
 import { isSilentRelease, notesForVersion, releaseNoteLines } from "./lib/releaseNotes";
 import { runConfetti } from "./lib/celebrate/celebrate";
 import { viewerFor } from "./lib/formats";
+import { isDashboard } from "./lib/pins";
 import { onOpenFileRequest } from "./lib/openFileRequest";
 import { editorMeasureStyle } from "./lib/editorMeasure";
 import { noteLabel } from "./lib/notePath";
@@ -1104,6 +1107,14 @@ export default function App() {
   const [graphOpen, setGraphOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [sidebarHidden, setSidebarHidden] = useState(readSidebarHidden);
+  // Dashboards borrow the full window without changing the user's normal
+  // sidebar preference. The toggle can reveal it for this dashboard visit.
+  const dashboardPath = !activeVirtual && openNote && isDashboard(openNote.path)
+    ? `${vault?.path ?? ""}/${openNote.path}` : null;
+  const [dashboardSidebarShown, setDashboardSidebarShown] = useState<string | null>(null);
+  const effectiveSidebarHidden = dashboardPath
+    ? dashboardSidebarShown !== dashboardPath : sidebarHidden;
+  useEffect(() => setDashboardSidebarShown(null), [dashboardPath]);
   const { width: sidebarWidth, setWidth: setSidebarWidth } = useSidebarWidth();
   // Guards the launch auto-reopen against StrictMode's double-invoke (dev).
   const didAutoReopenRef = useRef(false);
@@ -1256,6 +1267,16 @@ export default function App() {
         setUpdateHintHandler((v) => void onServerReleaseHint(v));
       }
     })();
+  }, []);
+
+  useEffect(() => {
+    const setHome = (event: Event) => {
+      const detail = (event as CustomEvent<{ path?: string; scope?: "personal" | "vault" }>).detail;
+      if (typeof detail?.path !== "string" || (detail.scope !== undefined && detail.scope !== "personal" && detail.scope !== "vault")) return;
+      void useStore.getState().setHome(detail.path, detail.scope).catch((e) => toast(String(e), "error"));
+    };
+    window.addEventListener("baalda:set-home", setHome);
+    return () => window.removeEventListener("baalda:set-home", setHome);
   }, []);
 
   // An in-note file chip was clicked (`lib/editor/livePreview.ts` →
@@ -1463,6 +1484,12 @@ export default function App() {
     };
 
     const onKey = async (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "h") {
+        e.preventDefault();
+        void useStore.getState().openHome().catch((err) => toast(String(err), "error"));
+        return;
+      }
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "n") {
         e.preventDefault();
         // One shared create path with the sidebar's New-note button and the tab
@@ -1502,7 +1529,7 @@ export default function App() {
         e.preventDefault();
         setGraphOpen((v) => !v);
       }
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f") {
+      if ((e.metaKey || e.ctrlKey) && ["f", "k", "p"].includes(e.key.toLowerCase())) {
         e.preventDefault();
         setSearchOpen((v) => !v);
       }
@@ -1572,18 +1599,26 @@ export default function App() {
           visible the moment the poll finds it, whatever is on screen. */}
       <UpdateGate launchVersion={launchUpdating} />
       <VaultSwitchOverlay />
+      <HomePicker />
+      <HomeDashboardDialog />
       <PromptedAuthDialog />
       <div
-        className={`app${sidebarHidden ? " sidebar-hidden" : ""}`}
+        className={`app${effectiveSidebarHidden ? " sidebar-hidden" : ""}`}
         style={{ "--sidebar-w": `${sidebarWidth}px` } as React.CSSProperties}
       >
         <SidebarToggle
-          hidden={sidebarHidden}
-          onToggle={() => setSidebarHidden((hidden) => {
-            const next = !hidden;
-            writeSidebarHidden(next);
-            return next;
-          })}
+          hidden={effectiveSidebarHidden}
+          onToggle={() => {
+            if (dashboardPath) {
+              setDashboardSidebarShown((shown) => shown === dashboardPath ? null : dashboardPath);
+            } else {
+              setSidebarHidden((hidden) => {
+                const next = !hidden;
+                writeSidebarHidden(next);
+                return next;
+              });
+            }
+          }}
           searchOpen={searchOpen}
           onSearch={() => setSearchOpen((open) => !open)}
           onGraph={document.documentElement.dataset.platform === "windows" ? () => setGraphOpen(true) : undefined}
@@ -1594,10 +1629,11 @@ export default function App() {
         <aside
           className="sidebar"
           id="vault-sidebar"
-          aria-hidden={sidebarHidden}
-          inert={sidebarHidden}
+          aria-hidden={effectiveSidebarHidden}
+          inert={effectiveSidebarHidden}
         >
           <SidebarHeader />
+          <PinnedSection />
           {/* The tree still lists the OUTGOING vault's files until the folder
               swaps, so a switch fades it and stops taking clicks — opening a note
               from a vault you're leaving would be cancelled by the epoch guard
@@ -1620,7 +1656,7 @@ export default function App() {
             </ErrorBoundary>
           </div>
         </aside>
-        {!sidebarHidden && <SidebarResizer width={sidebarWidth} onWidth={setSidebarWidth} />}
+        {!effectiveSidebarHidden && <SidebarResizer width={sidebarWidth} onWidth={setSidebarWidth} />}
   
         <main className="main">
           <MemberJoinedBanner />

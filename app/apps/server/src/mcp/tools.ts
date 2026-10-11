@@ -349,7 +349,7 @@ export const TOOLS: McpTool[] = [
     name: "read_note",
     annotations: { title: "Read note", ...READ },
     description:
-      "Read a note's full markdown content by its docId. Also returns its `revision` — pass it as expectedRevision to update_note / append_note / edit_note so a write is refused if the note changed in between.",
+      "Read a note's full text content (Markdown, HTML dashboard, or linked .url/.webloc note) by its docId. Also returns its `revision` — pass it as expectedRevision to update_note / append_note / edit_note so a write is refused if the note changed in between.",
     inputSchema: {
       type: "object",
       properties: { docId: S("Note docId from list_notes or search_notes") },
@@ -438,15 +438,15 @@ export const TOOLS: McpTool[] = [
     name: "create_note",
     annotations: { title: "Create note", ...CREATE },
     description:
-      "Create a new markdown note. relPath is the vault-relative path ending in .md (e.g. 'Ideas/draft.md'); every folder in it must already exist (see list_folders / create_folder). If you also pass folderId it must be the folder whose path is relPath's directory. Optionally seed its content.",
+      "Create a text note (.md, .markdown, .mdx, .txt, .html, .htm, .canvas, .url, or text .webloc). relPath is vault-relative; every folder must already exist (list_folders / create_folder). folderId must match its directory. HTML dashboards are ordinary notes: Baalda renders, it never generates. Write the entire page using readable notes; no JSON export. Optional SDK /__baalda/sdk.js provides baalda.vault.info/stats, notes.search/list/read/meta/backlinks, graph.edges, tags.list, properties.keys/values, state.get/set and app.open/openExternal. The opaque sandbox blocks fetch, nested frames and localStorage. Inline JS or cdnjs.cloudflare.com, cdn.jsdelivr.net, unpkg.com scripts are allowed. Seed content with a comment explaining the API. A .url uses [InternetShortcut] and URL=https://… on separate lines.",
     inputSchema: {
       type: "object",
       properties: {
         vaultId: S("Vault id from list_vaults"),
-        relPath: S("Vault-relative path ending in .md, e.g. 'Ideas/draft.md'"),
+        relPath: S("Vault-relative note path, e.g. 'Ideas/draft.md' or 'Home.html'"),
         title: S("Optional display title (defaults to the filename)"),
         folderId: S("Optional folder id; must match relPath's directory. Usually omit it — the folder is resolved from relPath."),
-        content: S("Optional initial markdown content"),
+        content: S("Optional initial text content (Markdown, HTML, or shortcut)"),
       },
       required: ["vaultId", "relPath"],
       additionalProperties: false,
@@ -464,12 +464,12 @@ export const TOOLS: McpTool[] = [
     name: "update_note",
     annotations: { title: "Replace note content", ...REPLACE },
     description:
-      "Replace a note's entire markdown content. Prefer edit_note for a change to part of a note. Pass expectedRevision (from read_note) so the write is refused if the note changed since you read it.",
+      "Replace a note's entire text content (including an HTML dashboard). Prefer edit_note for a change to part of a note. Pass expectedRevision (from read_note) so the write is refused if the note changed since you read it.",
     inputSchema: {
       type: "object",
       properties: {
         docId: S("Note docId"),
-        content: S("The new full markdown content"),
+        content: S("The new full text content"),
         expectedRevision: S(
           "The `revision` read_note returned. If the note no longer matches, the write is refused with a conflict — read again and retry.",
         ),
@@ -484,12 +484,12 @@ export const TOOLS: McpTool[] = [
     name: "append_note",
     annotations: { title: "Append to note", ...CREATE },
     description:
-      "Append text to the end of a note's markdown content. Pass an idempotencyKey when you may retry the call, so a retry cannot append the text twice.",
+      "Append text to the end of a note's text content. Pass an idempotencyKey when you may retry the call, so a retry cannot append the text twice.",
     inputSchema: {
       type: "object",
       properties: {
         docId: S("Note docId"),
-        text: S("Markdown to append to the end of the note"),
+        text: S("Text to append to the end of the note"),
         expectedRevision: S("Optional `revision` from read_note; refuses the append if the note changed."),
         idempotencyKey: S(
           "Optional caller-chosen key (e.g. a UUID). A repeat with the same key returns the first result instead of appending again.",
@@ -640,7 +640,7 @@ export const TOOLS: McpTool[] = [
       type: "object",
       properties: {
         docId: S("Note docId from list_notes or search_notes"),
-        relPath: S("New vault-relative path ending in .md, e.g. 'Archive/old.md'"),
+        relPath: S("New vault-relative note path, e.g. 'Archive/old.md' or 'Dashboards/Home.html'"),
         title: S("New display title"),
         folderId: {
           // Written inline rather than via S(): this one is nullable, and `null`

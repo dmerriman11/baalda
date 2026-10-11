@@ -38,7 +38,12 @@ vi.mock("../../lib/ipc", () => ({
 
 // The store is read two ways — a selector in `FilePreview`, `getState()` in the
 // leaves — so the fake answers both.
-const state = { vault: { path: "/Vault", epoch: 1 } };
+const state = {
+  vault: { path: "/Vault", epoch: 1 },
+  titles: [{ id: "html-note", path: "site/index.html", title: "Index" }],
+  tree: null, locks: [], lifts: [], session: null, syncEnabled: false,
+  docSyncState: {}, docIdByPath: {}, openNote: { path: "site/index.html" },
+};
 vi.mock("../../store", () => ({
   useStore: Object.assign((sel: (s: typeof state) => unknown) => sel(state), {
     getState: () => state,
@@ -46,6 +51,7 @@ vi.mock("../../store", () => ({
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
+  invoke: async (command: string) => command === "dashboard_mount_view" ? "test-view-lease" : command === "detect_agents" ? [] : undefined,
   convertFileSrc: (p: string) => `asset://localhost/${encodeURIComponent(p)}`,
 }));
 

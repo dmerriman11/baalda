@@ -41,10 +41,13 @@ import {
 import { authManager } from "./lib/auth/authManager";
 import {
   effectiveAppearance,
+  APPEARANCE_KEYS,
   withAppearance,
   type AppearanceKey,
   type AppearanceSettings,
+  type VaultAppearanceSettings,
 } from "./lib/appearanceSettings";
+import { readPersonalPins, readPersonalHome, writePersonalPins, writePersonalHome, renamePinnedFolders, togglePinned, resolveHome, type PinnedItem } from "./lib/pins";
 import { applyEffectiveTheme, type ThemeMode } from "./lib/theme";
 import { syncManager } from "./lib/sync/docSession";
 import { vaultScopes } from "./lib/sync/vaultScope";
@@ -576,7 +579,14 @@ interface AppStore {
   appearanceOverrides: AppearanceSettings;
   /** Vault appearance defaults by org id, fetched on vault open and patched
    *  live by the vault channel's `appearance-changed` frame. */
-  vaultAppearance: Record<string, AppearanceSettings>;
+  vaultAppearance: Record<string, VaultAppearanceSettings>;
+  personalPins: PinnedItem[];
+  personalHomeDocId: string | null;
+  homePickerOpen: boolean;
+  homeLandingPending: boolean;
+  togglePin: (path: string, isDir: boolean, scope?: "personal" | "vault") => Promise<void>;
+  setHome: (path: string | null, scope?: "personal" | "vault") => Promise<void>;
+  openHome: (pickerIfMissing?: boolean) => Promise<boolean>;
   /** The effective theme mode currently painted. */
   themeMode: ThemeMode;
   /** How the sidebar arranges everything the user hasn't arranged by hand.
@@ -777,11 +787,11 @@ interface AppStore {
   applyAppearance: () => void;
   /** Fetch an org's appearance defaults into `vaultAppearance`. Never throws. */
   loadVaultAppearance: (orgId: string) => Promise<void>;
-  /** Owner/admin: replace an org's defaults — applied optimistically, then PUT.
+  /** Owner/admin: patch an org's look defaults — applied optimistically.
    *  Rolls back to the previous object if the server refuses. */
-  saveVaultAppearance: (orgId: string, settings: AppearanceSettings) => Promise<void>;
+  saveVaultAppearance: (orgId: string, settings: VaultAppearanceSettings) => Promise<void>;
   /** A live `appearance-changed` frame (or any server answer) for an org. */
-  receiveVaultAppearance: (orgId: string, settings: AppearanceSettings) => void;
+  receiveVaultAppearance: (orgId: string, settings: VaultAppearanceSettings) => void;
   /** Open the mic and start broadcasting to the vault (button pressed). */
   startBroadcast: () => Promise<void>;
   /** Stop broadcasting and release the mic (button released). */
@@ -1346,6 +1356,31 @@ export function requestJoinWithCode(on: boolean): void {
 // we persist the last opened vault locally and reopen it on launch instead
 // of dumping the user on the picker every time.
 const LAST_VAULT_KEY = "context.lastVault";
+
+// A local watcher can report a move as separate removal/addition batches.
+// Remember only recently missing identities so tabs can follow the same file
+// when the index reports its new path. Synced moves remain registry-owned.
+const recentLocalNotePaths = new Map<string, { path: string; at: number }>();
+let recentLocalNoteEpoch: number | undefined;
+function followLocalIndexedMoves(next: ipc.NoteTitle[]): void {
+  const store = useStore.getState();
+  const epoch = store.vault?.epoch;
+  if (epoch !== recentLocalNoteEpoch || store.syncEnabled) recentLocalNotePaths.clear();
+  recentLocalNoteEpoch = epoch;
+  if (epoch === undefined || store.syncEnabled) return;
+  const now = Date.now();
+  for (const [id, remembered] of recentLocalNotePaths) if (now - remembered.at > 30_000) recentLocalNotePaths.delete(id);
+  const previous = new Map(store.titles.map((note) => [note.id, note.path]));
+  if (store.openNote?.id) previous.set(store.openNote.id, store.openNote.path);
+  const present = new Set(next.map((note) => note.id));
+  for (const [id, path] of previous) if (!present.has(id) && !recentLocalNotePaths.has(id)) recentLocalNotePaths.set(id, { path, at: now });
+  for (const note of next) {
+    const from = previous.get(note.id) ?? recentLocalNotePaths.get(note.id)?.path;
+    if (from && from !== note.path) useStore.getState().followNoteRename(from, note.path);
+    recentLocalNotePaths.delete(note.id);
+  }
+  while (recentLocalNotePaths.size > 2000) recentLocalNotePaths.delete(recentLocalNotePaths.keys().next().value!);
+}
 
 export function readLastVault(): string | null {
   try {
@@ -2071,6 +2106,57 @@ export const useStore = create<AppStore>((set, get) => ({
   folderSorts: {},
   memberJoined: null,
 
+  personalPins: [],
+  personalHomeDocId: null,
+  homePickerOpen: false,
+  homeLandingPending: false,
+  togglePin: async (path, isDir, scope = "personal") => {
+    const vault = get().vault;
+    if (!vault) return;
+    const epoch = vault.epoch;
+    const docId = isDir ? null : get().titles.find((t) => t.path === path)?.id ?? (await ipc.getNoteMeta(path))?.id;
+    if (!sameVault(get, epoch) || (!isDir && !docId)) return;
+    const item: PinnedItem = isDir ? { kind: "folder", path } : { kind: "note", docId: docId! };
+    if (scope === "personal") {
+      const next = togglePinned(get().personalPins, item);
+      writePersonalPins(vault.path, next);
+      set({ personalPins: next });
+    } else {
+      const orgId = get().syncEnabled ? get().session?.activeOrganizationId : null;
+      if (!orgId) throw new Error("A synced vault is required");
+      const res = await authManager.api.toggleVaultPin(orgId, item);
+      get().receiveVaultAppearance(orgId, res.settings);
+    }
+  },
+  setHome: async (path, scope = "personal") => {
+    const vault = get().vault;
+    if (!vault) return;
+    const epoch = vault.epoch;
+    const docId = path ? get().titles.find((t) => t.path === path)?.id ?? (await ipc.getNoteMeta(path))?.id : null;
+    if (!sameVault(get, epoch) || (path && !docId)) return;
+    if (scope === "personal") {
+      writePersonalHome(vault.path, docId ?? null);
+      set({ personalHomeDocId: docId ?? null });
+    } else {
+      const orgId = get().syncEnabled ? get().session?.activeOrganizationId : null;
+      if (!orgId) throw new Error("A synced vault is required");
+      const res = await authManager.api.patchVaultAppearance(orgId, { homeDocId: docId ?? null });
+      get().receiveVaultAppearance(orgId, res.settings);
+    }
+  },
+  openHome: async (pickerIfMissing = true) => {
+    const orgId = get().syncEnabled ? get().session?.activeOrganizationId : null;
+    const id = resolveHome(get().personalHomeDocId, orgId ? get().vaultAppearance[orgId]?.homeDocId : null);
+    const target = id ? get().titles.find((t) => t.id === id) : null;
+    if (target) {
+      set({ homePickerOpen: false });
+      await get().openNoteByPath(target.path);
+      return true;
+    }
+    if (pickerIfMissing) set({ homePickerOpen: true });
+    return false;
+  },
+
   setVault: (v) => {
     // Also fires from Rust's `vault-opened` event, which is the only signal some
     // opens produce — so this is where a local vault gets its scope.
@@ -2085,6 +2171,10 @@ export const useStore = create<AppStore>((set, get) => ({
     if (switched) vaultVisibility.publish(null);
     set({
       vault: v,
+      personalPins: readPersonalPins(v?.path),
+      personalHomeDocId: readPersonalHome(v?.path),
+      homePickerOpen: false,
+      ...(switched ? { homeLandingPending: true } : {}),
       itemColors: readItemColors(v?.path),
       itemOrder: readItemOrder(v?.path),
       folderSorts: readFolderSorts(v?.path),
@@ -2287,7 +2377,9 @@ export const useStore = create<AppStore>((set, get) => ({
       throw e;
     }
     if (!sameVault(get, epoch)) return;
+    followLocalIndexedMoves(titles);
     set({ titles });
+    if (get().homeLandingPending && !get().openNote && !get().openingNotePath && !get().activeVirtualTab) void get().openHome(false).catch((e) => console.warn("[home] landing failed", e));
     // Tags ride along with titles: both are index-derived completion sources
     // refreshed at the same moments (vault open, note create, structural
     // batches), and neither is worth its own trigger. Fire-and-forget so a
@@ -2352,6 +2444,7 @@ export const useStore = create<AppStore>((set, get) => ({
     );
     if (!sameVault(get, epoch)) return;
     const next = applyTitlePatch(get().titles, updates, removed);
+    followLocalIndexedMoves(next);
     if (next !== get().titles) set({ titles: next });
   },
 
@@ -2379,12 +2472,19 @@ export const useStore = create<AppStore>((set, get) => ({
     // Land a freshly signed-in user on the Welcome note — but never yank them
     // away from a note they already have open.
     if (get().openNote) return;
+    const epoch = get().vault?.epoch;
+    const orgId = get().syncEnabled ? get().session?.activeOrganizationId : null;
+    if (orgId) await get().loadVaultAppearance(orgId);
+    if (!sameVault(get, epoch) || get().openNote || get().openingNotePath) return;
+    if (await get().openHome(false)) return;
+    set({ homeLandingPending: false });
     const hasWelcome = get().titles.some((t) => t.path === WELCOME_NOTE_PATH);
     if (hasWelcome) await get().openNoteByPath(WELCOME_NOTE_PATH);
   },
 
   openNoteByPath: async (path) => {
     const epoch = get().vault?.epoch;
+    const stillOpening = () => sameVault(get, epoch) && get().openingNotePath === path;
     // A note opened from anywhere takes the editor area back from a virtual tab.
     if (get().activeVirtualTab) set({ activeVirtualTab: null });
     // Name the note being opened before the first await. In a synced vault this
@@ -2392,7 +2492,7 @@ export const useStore = create<AppStore>((set, get) => ({
     // so the row stays unselected and the editor keeps showing the previous note
     // for the whole round trip — a click that visibly does nothing. The sidebar
     // row and the editor both watch this and acknowledge the click at once.
-    set({ openingNotePath: path });
+    set({ openingNotePath: path, homeLandingPending: false });
     try {
       // The boot paints before sync primes, so this click can land while the
       // registry holds no doc-id map. Opening a MAPPED note then means opening
@@ -2408,7 +2508,7 @@ export const useStore = create<AppStore>((set, get) => ({
         }).action === "wait"
       ) {
         await Promise.race([syncReadyGate.promise, sleep(SYNC_GATE_MS)]);
-        if (!sameVault(get, epoch)) return;
+        if (!stillOpening()) return;
         if (!syncManager.isSyncable() && get().authStatus !== "signed-out") {
           // The belt fired. Never expected: the prime is one local file read,
           // and every refusal path releases the gate explicitly. Say so, because
@@ -2419,7 +2519,7 @@ export const useStore = create<AppStore>((set, get) => ({
         }
       }
       const meta = await ipc.getNoteMeta(path);
-      if (!sameVault(get, epoch)) return; // vault switched mid-open — drop it
+      if (!stillOpening()) return; // vault switched mid-open — drop it
       const title = meta?.title ?? path.split("/").pop() ?? path;
       // Ensure the note is registered server-side BEFORE the editor opens it, so
       // its doc_id is known and the sync provider connects on first open.
@@ -2435,7 +2535,7 @@ export const useStore = create<AppStore>((set, get) => ({
           await syncManager.registry.registerNote(path, title, meta?.id);
         } catch (e) {
           console.warn("[sync] registerNote failed", e);
-          if (!sameVault(get, epoch)) return;
+          if (!stillOpening()) return;
           // The note opens regardless (local-first: the text is safe on disk),
           // but it opens UNREGISTERED — no docId, so no provider connects and
           // nothing it says reaches the server. Two things keep that from being
@@ -2457,7 +2557,7 @@ export const useStore = create<AppStore>((set, get) => ({
             );
           }
         }
-        if (!sameVault(get, epoch)) return;
+        if (!stillOpening()) return;
       }
       set((s) => ({
         openNote: { path, id: meta?.id ?? null, title },
@@ -2838,6 +2938,17 @@ export const useStore = create<AppStore>((set, get) => ({
   },
 
   remapTabs: (from, to) => {
+    const vault = get().vault;
+    const pins = renamePinnedFolders(get().personalPins, from, to);
+    const orgId = get().syncEnabled ? get().session?.activeOrganizationId : null;
+    if (orgId) {
+      const appearance = get().vaultAppearance[orgId];
+      if (appearance?.pinnedItems) get().receiveVaultAppearance(orgId, { ...appearance, pinnedItems: renamePinnedFolders(appearance.pinnedItems, from, to) });
+    }
+    if (vault && pins.some((p, i) => p !== get().personalPins[i])) {
+      writePersonalPins(vault.path, pins);
+      set({ personalPins: pins });
+    }
     const tabs = get().openTabs;
     const mapped = tabs.map((p) =>
       p === from ? to : p.startsWith(from + "/") ? to + p.slice(from.length) : p,
@@ -2919,6 +3030,8 @@ export const useStore = create<AppStore>((set, get) => ({
       // The root-freeze latch rides the same signal the server already sends
       // when it changes, so a teammate flipping it reaches this app live.
       void get().refreshVaultSettings();
+      const orgId = get().syncEnabled ? get().session?.activeOrganizationId : null;
+      if (orgId) void get().loadVaultAppearance(orgId);
     });
     // A teammate changed shares (lock/unlock, grant/revoke). Fresh lock
     // knowledge is what lets the editor open a just-locked note read-only from
@@ -3405,9 +3518,11 @@ export const useStore = create<AppStore>((set, get) => ({
   },
 
   loadVaultAppearance: async (orgId) => {
+    const before = get().vaultAppearance[orgId];
     try {
       const res = await authManager.api.getVaultAppearance(orgId);
-      get().receiveVaultAppearance(orgId, res.settings);
+      // A live frame or local save arriving during this GET owns the cache.
+      if (get().vaultAppearance[orgId] === before) get().receiveVaultAppearance(orgId, res.settings);
     } catch {
       // Older server (404) or offline: the vault simply sets nothing we know of.
     }
@@ -3415,16 +3530,21 @@ export const useStore = create<AppStore>((set, get) => ({
 
   saveVaultAppearance: async (orgId, settings) => {
     const prev = get().vaultAppearance[orgId] ?? {};
+    const look = Object.fromEntries(APPEARANCE_KEYS.filter((key) => settings[key] !== undefined).map((key) => [key, settings[key]])) as AppearanceSettings;
+    settings = { ...prev, ...look };
     get().receiveVaultAppearance(orgId, settings);
     try {
-      const res = await authManager.api.putVaultAppearance(orgId, settings);
+      const res = await authManager.api.patchVaultAppearance(orgId, look);
       // A later local save may have landed meanwhile; only adopt the answer
       // if nothing newer replaced what we sent.
-      if (get().vaultAppearance[orgId] === settings || shallowSameAppearance(get().vaultAppearance[orgId], settings)) {
+      if (APPEARANCE_KEYS.every((key) => get().vaultAppearance[orgId]?.[key] === settings[key])) {
         get().receiveVaultAppearance(orgId, res.settings);
       }
     } catch (e) {
-      get().receiveVaultAppearance(orgId, prev);
+      const current = get().vaultAppearance[orgId] ?? {};
+      if (APPEARANCE_KEYS.every((key) => current[key] === settings[key])) {
+        get().receiveVaultAppearance(orgId, { ...current, ...Object.fromEntries(APPEARANCE_KEYS.map((key) => [key, prev[key]])) });
+      }
       throw e;
     }
   },
@@ -3432,6 +3552,7 @@ export const useStore = create<AppStore>((set, get) => ({
   receiveVaultAppearance: (orgId, settings) => {
     set({ vaultAppearance: { ...get().vaultAppearance, [orgId]: settings } });
     get().applyAppearance();
+    if (get().homeLandingPending && !get().openNote && !get().openingNotePath && !get().activeVirtualTab) void get().openHome(false).catch((e) => console.warn("[home] landing failed", e));
   },
 
   startBroadcast: async () => {
@@ -4416,6 +4537,10 @@ export const useStore = create<AppStore>((set, get) => ({
     armSyncGate();
     set({
       vault: info,
+      personalPins: readPersonalPins(info.path),
+      personalHomeDocId: readPersonalHome(info.path),
+      homePickerOpen: false,
+      homeLandingPending: true,
       ...vaultScopedSyncReset(),
       openFolderIsSynced: null,
       itemColors: readItemColors(info.path),
@@ -4532,6 +4657,10 @@ export const useStore = create<AppStore>((set, get) => ({
     armSyncGate();
     set({
       vault: v,
+      personalPins: readPersonalPins(v.path),
+      personalHomeDocId: readPersonalHome(v.path),
+      homePickerOpen: false,
+      homeLandingPending: true,
       ...vaultScopedSyncReset(),
       openFolderIsSynced: true,
       itemColors: readItemColors(v.path),
@@ -5167,10 +5296,6 @@ if (import.meta.hot) {
 // The editor text size is a CSS token on :root, so it must be published once at
 // startup (after restart) as well as on every change.
 applyEditorFontSize(useStore.getState().editorFontSize);
-
-function shallowSameAppearance(a: AppearanceSettings | undefined, b: AppearanceSettings): boolean {
-  return JSON.stringify(a ?? {}) === JSON.stringify(b);
-}
 
 // Vault appearance: recompute the effective look whenever the open vault (or
 // its org) changes, and fetch that org's defaults once per open. A switch to a

@@ -10,6 +10,7 @@
 // Personal always wins. Pure on purpose: no store, no localStorage, so the
 // whole rule is unit-tested in `__tests__/appearanceSettings.test.ts`.
 
+import { parsePins, type PinnedItem } from "./pins";
 import type { PropertiesMode } from "./editor/frontmatter";
 import type { ThemeMode } from "./theme";
 
@@ -25,6 +26,11 @@ export interface AppearanceSettings {
   textSize?: number;
   lineNumbers?: boolean;
   properties?: PropertiesMode;
+}
+
+export interface VaultAppearanceSettings extends AppearanceSettings {
+  pinnedItems?: PinnedItem[];
+  homeDocId?: string | null;
 }
 
 export type AppearanceKey = keyof AppearanceSettings;
@@ -158,4 +164,15 @@ export function withAppearance<K extends AppearanceKey>(
   if (value === undefined) delete next[key];
   else next[key] = value;
   return next;
+}
+
+/** Shared navigation travels with appearance, without becoming a personal look setting. */
+export function parseVaultAppearanceSettings(raw: unknown): VaultAppearanceSettings {
+  const out: VaultAppearanceSettings = parseAppearanceSettings(raw);
+  if (raw && typeof raw === "object") {
+    const value = raw as Record<string, unknown>;
+    if (Array.isArray(value.pinnedItems)) out.pinnedItems = parsePins(value.pinnedItems);
+    if (value.homeDocId === null || (typeof value.homeDocId === "string" && /^[A-Za-z0-9._-]{1,128}$/.test(value.homeDocId))) out.homeDocId = value.homeDocId;
+  }
+  return out;
 }

@@ -6,6 +6,8 @@
  * mirrors this contract, so anything outside it is refused rather than stored.
  */
 export type VaultAppearance = {
+  pinnedItems?: ({ kind: "note"; docId: string } | { kind: "folder"; path: string })[];
+  homeDocId?: string | null;
   theme?: "system" | "light" | "dark";
   autoColors?: boolean;
   /** Character widths, an integer 60..120, or the full editor width. */
@@ -30,6 +32,14 @@ function inRange(v: unknown, min: number, max: number): v is number {
 
 type Check = (v: unknown) => boolean;
 const CHECKS: Record<keyof VaultAppearance, Check> = {
+  homeDocId: (v) => v === null || (typeof v === "string" && /^[A-Za-z0-9._-]{1,128}$/.test(v)),
+  pinnedItems: (v) => Array.isArray(v) && v.length <= 200 && v.every((pin) => {
+    if (!pin || typeof pin !== "object" || Array.isArray(pin) || Object.keys(pin).length !== 2) return false;
+    if (pin.kind === "note") return typeof pin.docId === "string" && /^[A-Za-z0-9._-]{1,128}$/.test(pin.docId);
+    return pin.kind === "folder" && typeof pin.path === "string" && pin.path.length > 0 && pin.path.length <= 4096 &&
+      !/[\\\x00]/.test(pin.path) && !pin.path.startsWith("/") &&
+      pin.path.split("/").every((part: string) => part !== "" && part !== "." && part !== ".." && !part.startsWith("."));
+  }),
   theme: (v) => typeof v === "string" && THEMES.has(v),
   autoColors: (v) => typeof v === "boolean",
   contentWidth: (v) =>

@@ -145,6 +145,9 @@ See [[STATUS]] for the live build checklist.
 
 ## Baalda Assistant
 
+- [Home and dashboards](DASHBOARDS.md): personal/shared pins and Home, ordinary HTML
+  notes, the optional read-only bridge, linked dashboards, and installed Codex.
+
 - [Agent diagnostics and repairs](HOUSEKEEPER.md): included for billing-disabled
   self-hosters; Pro (Team under `BILLING_MODEL=team`) on billing-enabled servers. BYOK model setup, reviewed actions
   and verification.

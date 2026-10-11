@@ -43,6 +43,7 @@ export type FormatCategory =
 export type ViewerKind =
   | "editor"
   | "html"
+  | "link"
   | "code"
   | "image"
   | "pdf"
@@ -183,6 +184,19 @@ export const FORMATS: readonly FormatDef[] = [
     maxBytes: MAX_NOTE_BYTES,
     textExtract: "utf8",
     cmLang: jsonLang,
+  },
+
+  {
+    exts: ["url", "webloc"],
+    mimes: ["application/internet-shortcut"],
+    category: "text",
+    viewer: "link",
+    embed: "chip",
+    surface: true,
+    openable: true,
+    syncAs: "note",
+    maxBytes: MAX_NOTE_BYTES,
+    textExtract: "utf8",
   },
 
   // --- images ---------------------------------------------------------------
@@ -846,6 +860,8 @@ export const NOTE_EXTS: readonly string[] = [
   "html",
   "htm",
   "canvas",
+  "url",
+  "webloc",
 ];
 
 const NOTE_EXT_SET = new Set(NOTE_EXTS);

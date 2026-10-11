@@ -10,7 +10,10 @@ import {
 } from "./fixture-api";
 import { fixtureIpc } from "./fixture-ipc";
 import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
+import dailyDashboard from "../../src/dashboards/templates/daily-home.html?raw";
 const params = new URLSearchParams(location.search);
+notes.push({ ...notes[0], id: "preview-home", docId: "preview-home", relPath: "Home.html", title: "Home", folderId: null });
+notes.push({ ...notes[0], id: "preview-link", docId: "preview-link", relPath: "Artifact.url", title: "Artifact", folderId: null });
 Object.defineProperty(navigator, "userAgent", {
   configurable: true,
   value:
@@ -22,7 +25,7 @@ localStorage.setItem("cbk-theme", params.get("theme") || "light");
 localStorage.setItem("context.sidebarWidth", "328");
 localStorage.setItem(
   "context.sidebarHidden",
-  params.get("sidebarHidden") || "false",
+  params.get("sidebarHidden") === "true" ? "hidden" : "shown",
 );
 const vault = {
   path:
@@ -32,6 +35,8 @@ const vault = {
   name: "Product team",
   epoch: 1,
 };
+localStorage.setItem(`context.pins:${vault.path}`, JSON.stringify([{ kind: "note", docId: "preview-home" }, { kind: "folder", path: "Specs" }]));
+localStorage.setItem(`context.home:${vault.path}`, "preview-home");
 localStorage.setItem(
   "context.orgVaults",
   JSON.stringify({ "preview-org": vault.path }),
@@ -75,10 +80,17 @@ const noteBytes = new Map(
       : `Sample content for ${n.title}.\n\nThis note is part of the local interface simulator.\n`,
   ]),
 );
+noteBytes.set("Home.html", dailyDashboard);
+noteBytes.set("Artifact.url", "[InternetShortcut]\nURL=https://claude.ai/artifact/demo-synthetic\n");
+const uiStates = new Map<string, string>();
 let maximized = false;
 mockWindows("main");
 mockIPC(
   (cmd, args: any) => {
+    if (cmd === "get_note_ui_state") return uiStates.get(args.docId) ?? null;
+    if (cmd === "set_note_ui_state") { uiStates.set(args.docId, args.uiState); return null; }
+    if (cmd === "detect_agents") return [{ agent: "codex", version: "0.160.1 (synthetic)", signedIn: true, runnable: true, detail: "Synthetic preview; no CLI is launched." }, { agent: "claude", version: "2.1 (synthetic)", signedIn: true, runnable: false, detail: "Use Ask AI to change this to copy a prompt." }];
+    if (cmd === "run_agent" || cmd === "cancel_agent") throw new Error("Agent execution is disabled in the simulator.");
     const fixture = fixtureIpc(cmd, args);
     if (fixture.handled) return fixture.value;
     switch (cmd) {
@@ -112,7 +124,21 @@ mockIPC(
           tags: [],
         };
       case "read_note":
+      case "dashboard_read_note":
         return noteBytes.get(args.path) ?? "";
+      case "query_notes":
+      case "list_notes_by_tag":
+      case "list_notes_by_property":
+        return notes.filter((note) => !args.query?.docIds || args.query.docIds.includes(note.id)).filter((note) => !args.query?.extensions || args.query.extensions.some((ext: string) => note.relPath.endsWith(`.${ext}`))).map((note) => ({ id: note.id, path: note.relPath, title: note.title, mtime: Math.floor(Date.now() / 1000), frontmatter: null, tags: [] })).slice(0, args.query?.limit ?? 100);
+      case "write_note_if_missing": {
+        if (noteBytes.has(args.path)) return false;
+        noteBytes.set(args.path, args.content);
+        const id = `preview-created-${notes.length}`;
+        notes.push({ ...notes[0], id, docId: id, relPath: args.path, title: args.path.split("/").pop().replace(/\.[^.]+$/, ""), folderId: null });
+        titles.push({ id, path: args.path, title: notes[notes.length - 1].title });
+        tree.children.push(item(args.path));
+        return true;
+      }
       case "load_yjs_state":
         return new ArrayBuffer(9);
       case "append_yjs_update":
@@ -214,6 +240,9 @@ Object.defineProperty(syncManager.registry, "vaultId", {
 const { useStore } = await import("/src/store.ts");
 useStore.setState({
   ...initialStore,
+  docIdByPath: Object.fromEntries(notes.map((note) => [note.relPath, note.id])),
+  personalHomeDocId: "preview-home",
+  personalPins: [{ kind: "note", docId: "preview-home" }, { kind: "folder", path: "Specs" }],
   initAuth: async () => {},
   openNoteByPath: async (path: string) => {
     const n = notes.find((n) => n.relPath === path);

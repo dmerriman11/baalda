@@ -12,7 +12,7 @@
 
 import { markAccessTreeStale } from "../accessTreeStale";
 import { isAttachmentWanted, onAttachmentWanted } from "../attachmentArrivals";
-import type { AppearanceSettings } from "../appearanceSettings";
+import type { VaultAppearanceSettings } from "../appearanceSettings";
 import { NOT_CREATOR_MESSAGE, isNotCreatorCode, notCreatorCodeOf } from "./deletePolicy";
 import { Awareness } from "y-protocols/awareness";
 import * as Y from "yjs";
@@ -477,7 +477,7 @@ export class SyncManager implements InboundHost {
   private onMemberJoined?: (name: string) => void;
   private onMemberRemoved?: (change: { orgId: string; userId: string; reason: "removed" | "left" }) => void;
   private onOrgChanged?: (change: { name?: string; logo?: string | null }) => void;
-  private onAppearanceChanged?: (change: { orgId?: string; settings: AppearanceSettings }) => void;
+  private onAppearanceChanged?: (change: { orgId?: string; settings: VaultAppearanceSettings }) => void;
   /** Mirrors the registry's {relPath → docId} map to the UI (coalesced). */
   private onRegistryMap?: (map: Record<string, string>) => void;
   /** Mirrors the registry's {docId → last-edit} stamps to the UI. */
@@ -1476,7 +1476,7 @@ export class SyncManager implements InboundHost {
   /** UI subscribes here to patch the open vault's name/icon live (#306). */
   /** UI subscribes here for live vault appearance defaults (same path as #306). */
   setAppearanceChangedListener(
-    cb: ((change: { orgId?: string; settings: AppearanceSettings }) => void) | undefined,
+    cb: ((change: { orgId?: string; settings: VaultAppearanceSettings }) => void) | undefined,
   ): void {
     this.onAppearanceChanged = cb;
   }

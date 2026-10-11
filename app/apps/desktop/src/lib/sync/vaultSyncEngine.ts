@@ -10,7 +10,7 @@
 // current on disk regardless of the UI. The engine itself never touches disk or
 // CodeMirror — it moves opaque Yjs updates to the sink.
 
-import type { AppearanceSettings } from "../appearanceSettings";
+import type { VaultAppearanceSettings } from "../appearanceSettings";
 import { ApiClient, ApiError } from "../api";
 import { markOnce } from "../perf";
 import { notifyInvitationFrame } from "../invitationLive";
@@ -132,7 +132,7 @@ export interface VaultSyncEngineOptions {
    *  fields present in the frame are set. */
   onOrgChanged?: (change: { name?: string; logo?: string | null }) => void;
   /** Fired when the vault's appearance defaults changed (`appearance-changed`). */
-  onAppearanceChanged?: (change: { orgId?: string; settings: AppearanceSettings }) => void;
+  onAppearanceChanged?: (change: { orgId?: string; settings: VaultAppearanceSettings }) => void;
   /** Fired for each teammate presence update (`presence`): who is now viewing
    *  which note (docId null = they left / closed the note). The sink aggregates
    *  these into the sidebar roster. */
@@ -348,7 +348,7 @@ export class VaultSyncEngine {
   private readonly onMemberJoined?: (name: string) => void;
   private readonly onMemberRemoved?: (change: { orgId: string; userId: string; reason: "removed" | "left" }) => void;
   private readonly onOrgChanged?: (change: { name?: string; logo?: string | null }) => void;
-  private readonly onAppearanceChanged?: (change: { orgId?: string; settings: AppearanceSettings }) => void;
+  private readonly onAppearanceChanged?: (change: { orgId?: string; settings: VaultAppearanceSettings }) => void;
   private readonly onPresence?: (peer: VaultPeer) => void;
   private readonly onVoice?: (frame: VoiceFrame) => void;
   private readonly onInboundProgress?: (done: number, total: number) => void;

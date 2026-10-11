@@ -22,7 +22,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import type { TreeNode } from "../lib/ipc";
 import * as ipc from "../lib/ipc";
 import {
-  automaticItemColorAssignments,
+  automaticTreeColors,
   ITEM_COLORS,
   itemColorFill,
   itemColorValue,
@@ -38,8 +38,10 @@ import {
   renameInOrder,
 } from "../lib/ordering";
 import { pinModified, sortTree, TREE_SORTS } from "../lib/tree/sort";
+import { pinKey } from "../lib/pins";
+import { requestNewDashboard } from "../lib/homeEvents";
 import { isBlankTreeTarget } from "../lib/tree/blankTarget";
-import { LOCK_TITLES, lockScopesByPath, type LockScope } from "../lib/locks";
+import { LOCK_TITLES, effectiveLockForPath, lockScopesByPath, type LockScope } from "../lib/locks";
 import { ancestorPaths } from "../lib/accessTree";
 import { nodeAt } from "../lib/tree/lazyTree";
 import { displayName } from "../lib/notePath";
@@ -531,28 +533,7 @@ export function FileTree() {
     if (!automaticItemColors) return {};
     const owner = session?.user.id ?? "local";
     const vaultIdentity = session?.activeOrganizationId ?? vault?.path ?? "vault";
-    const assigned: Record<string, string> = {};
-    const walk = (siblings: TreeNode[]) => {
-      Object.assign(
-        assigned,
-        automaticItemColorAssignments(
-          owner,
-          vaultIdentity,
-          siblings
-            .filter((node) => node.isDir)
-            .map((node) => ({
-              key: node.path,
-              identity: docIdByPath[node.path] ?? node.path,
-              explicitColorId: itemColors[node.path],
-            })),
-        ),
-      );
-      for (const node of siblings) {
-        if (node.children) walk(node.children);
-      }
-    };
-    walk(data);
-    return assigned;
+    return automaticTreeColors(owner, vaultIdentity, data, docIdByPath, itemColors);
   }, [
     automaticItemColors,
     data,
@@ -1944,6 +1925,26 @@ export function FileTree() {
                 { left: menu.x, top: menu.y, visibility: "hidden" }
           }
         >
+          <li onClick={() => requestNewDashboard()}>New dashboard…</li>
+          <li onClick={() => requestNewDashboard("link")}>Add dashboard link…</li>
+          {menu.node && (menu.node.data.isDir || isNoteExt(menu.node.data.path)) && (() => {
+            const path = menu.node!.data.path;
+            const isDir = menu.node!.data.isDir;
+            const state = useStore.getState();
+            const docId = state.titles.find((t) => t.path === path)?.id;
+            const key = isDir ? pinKey({ kind: "folder", path }) : docId ? pinKey({ kind: "note", docId }) : null;
+            const orgId = syncEnabled ? session?.activeOrganizationId : null;
+            const appearance = orgId ? state.vaultAppearance[orgId] : undefined;
+            const personal = key && state.personalPins.some((p) => pinKey(p) === key);
+            const shared = key && appearance?.pinnedItems?.some((p) => pinKey(p) === key);
+            const fail = (e: unknown) => toast(e instanceof Error ? e.message : String(e), "error");
+            return <>
+              <li className="menu-sep-item" onClick={() => void state.togglePin(path, isDir).catch(fail)}>{personal ? "Unpin" : "Pin"}</li>
+              {canManage && orgId && <li onClick={() => void state.togglePin(path, isDir, "vault").catch(fail)}>{shared ? "Unpin for everyone" : "Pin for everyone"}</li>}
+              {!isDir && <li onClick={() => void state.setHome(path).catch(fail)}>Set as my home</li>}
+              {!isDir && canManage && orgId && <li onClick={() => void state.setHome(path, "vault").catch(fail)}>Set as vault home</li>}
+            </>;
+          })()}
           {/* Creating at a frozen root is refused; the items stay clickable so
               the refusal toast can say why, but they read as unavailable. */}
           <li
@@ -2281,7 +2282,7 @@ function TreeRow(props: NodeRendererProps<TreeNode>) {
     <Node
       {...props}
       selectedPath={shared.selectedPath}
-      lock={shared.lockByPath.get(path) ?? null}
+      lock={effectiveLockForPath(shared.lockByPath, path)}
       syncIndex={shared.syncIndex}
       presenceByDoc={shared.presenceByDoc}
       color={
@@ -2565,7 +2566,7 @@ function SidebarAvatar({ peer }: { peer: VaultPeer }) {
 }
 
 /** The overlapping avatar cluster shown after a row's label, before its badges. */
-function SidebarPresence({ peers }: { peers: VaultPeer[] }) {
+export function SidebarPresence({ peers }: { peers: VaultPeer[] }) {
   if (peers.length === 0) return null;
   const shown =
     peers.length > MAX_ROW_AVATARS

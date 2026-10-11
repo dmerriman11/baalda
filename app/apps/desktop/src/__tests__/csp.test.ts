@@ -40,6 +40,8 @@ const directives = new Map<string, string[]>(
     }),
 );
 
+const VIEW_ORIGINS = ["baalda-view:", "http://baalda-view.localhost", "https://baalda-view.localhost"];
+
 const ASSET_ORIGINS = ["asset:", "http://asset.localhost", "https://asset.localhost"];
 
 describe("packaged CSP", () => {
@@ -54,6 +56,23 @@ describe("packaged CSP", () => {
     expect(frame).toBeDefined();
     expect(frame).toContain("'self'");
     for (const origin of ASSET_ORIGINS) expect(frame, origin).toContain(origin);
+  });
+
+  it("allows isolated dashboards only as frames", () => {
+    for (const origin of VIEW_ORIGINS) {
+      expect(directives.get("frame-src"), origin).toContain(origin);
+      expect(directives.get("script-src"), origin).not.toContain(origin);
+      expect(directives.get("connect-src"), origin).not.toContain(origin);
+    }
+  });
+
+  it("permits the HTTPS remote viewer while its host checks the configured allowlist", () => {
+    // A static packaged CSP cannot change when the user opts into any HTTPS
+    // link. RemoteDashboardView gates iframe creation; local HTML's own CSP
+    // still refuses nested frames and is never given the remote bridge.
+    expect(directives.get("frame-src")).toContain("https:");
+    expect(directives.get("frame-src")).not.toContain("http:");
+    expect(directives.get("frame-src")).not.toContain("*");
   });
 
   it("declares media-src so <video>/<audio> can read the asset protocol", () => {

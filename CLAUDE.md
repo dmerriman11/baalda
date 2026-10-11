@@ -131,11 +131,19 @@ Errors: single `AppError(String)` (`error.rs`).
   (`src/lib/formats.ts` — `SURFACED_EXTS`/`NOTE_EXTS`, the single authority for what a file is: how it
   surfaces, opens, embeds, uploads and syncs) and with the `NOTE_EXTS` literals in `sync/registry.ts` /
   `sync/inbound.ts`; `formatsLockstep.test.ts` reads those source files and fails on any drift. Only
-  `NOTE_EXTS` (md, markdown, mdx, txt, html, htm, canvas) are CRDT notes and index rows; a viewer
+  `NOTE_EXTS` (md, markdown, mdx, txt, html, htm, canvas, url, webloc) are CRDT notes and index rows; a viewer
   choice is display-only and never promotes a file into the bridge. The webview CSP in
   `tauri.conf.json` is pinned by `src/__tests__/csp.test.ts` — Tauri injects it only in packaged
   builds, `frame-src`/`media-src` must allow `asset:`, `http://asset.localhost` (Windows) and
   `https://asset.localhost`, and dev never exercises it.
+- `dashboard.rs` / `dashboard_query.rs` — HTML notes render through the separate `baalda-view`
+  protocol with guest CSP and an opaque-origin iframe. Epoch-pinned, per-view leases allow the
+  mounted HTML plus safe local presentation assets; private paths and symlink escapes are denied.
+  The optional SDK uses a bounded, source-checked host bridge for reads, theme, state and navigation;
+  synced reads require a fresh server-readable listing. **Baalda renders; it never generates.**
+  Home/personal pins are device-local, shared Home/pins use `vault_appearance`; appearance PATCH
+  and atomic pin toggles preserve concurrent fields. Installed Codex runs under a dedicated named
+  permission profile; Claude is copy-prompt only. See `docs/DASHBOARDS.md` for API and boundaries.
 - `notefile.rs` — **atomic writes** (temp + rename), `sha256_hex`.
 - `parse.rs` — `parse_note` → title / tags / `[[wikilinks]]` / frontmatter. `derive_title`
   (frontmatter `title:` → first H1 → stem) is the **index/search/wikilink** title — `index.rs`
@@ -145,7 +153,11 @@ Errors: single `AppError(String)` (`error.rs`).
 - `index.rs` — SQLite at `<vault>/.context/index.sqlite` (WAL): `notes` (id=`doc_id`, path UNIQUE),
   FTS5 `notes_fts`, `tags`/`note_tags`, `links`, `folders`, `yjs_updates`, `yjs_snapshot`. Notes keyed by
   `doc_id`; `rebuild` preserves ids and never wipes the CRDT tables; `rename_note` rewrites paths by id so
-  backlinks survive moves.
+  backlinks survive moves. `note_file_identity.rs` retains reliable filesystem identity plus creation
+  time beside each note ID, including across removal/rebuild batches. A unique owner at an absent old
+  path lets local external renames retain identity; equal content or ambiguous hard links never merge.
+  Unsupported identity metadata fails closed. Local tabs follow these indexed moves; synced moves
+  remain registry-owned.
 - `watcher.rs` — `notify` recursive watcher, 150ms-debounced (1000ms ceiling), emits ONE batched
   `files-changed {changes: [{path, kind}]}` per drain. `kind` is `modified` | `removed` | `tree`, derived
   from an existence check rather than forwarded from `notify` (whose event kinds and rename pairing we

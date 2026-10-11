@@ -1,12 +1,21 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { readFileSync } from "node:fs";
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
 
 // https://vite.dev/config/
 export default defineConfig(async ({ mode }) => ({
-  plugins: [react()],
+  plugins: [react(), ...(mode === "simulator" ? [{
+    name: "dashboard-simulator-sdk",
+    configureServer(server: import("vite").ViteDevServer) {
+      server.middlewares.use("/__baalda/sdk.js", (_request, response) => {
+        response.setHeader("Content-Type", "application/javascript");
+        response.end(readFileSync(new URL("./src/lib/dashboard/sdk.js", import.meta.url), "utf8"));
+      });
+    },
+  }] : [])],
 
   build: {
     /**

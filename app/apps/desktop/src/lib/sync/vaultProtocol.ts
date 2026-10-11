@@ -1,4 +1,4 @@
-import { parseAppearanceSettings, type AppearanceSettings } from "../appearanceSettings";
+import { parseVaultAppearanceSettings, type VaultAppearanceSettings } from "../appearanceSettings";
 
 // Client half of the vault replication channel framing (spec 05 §3.1). Mirrors
 // the server's `sync/vault-protocol.ts`: JSON text control frames + binary data
@@ -159,7 +159,7 @@ export type ServerControl =
   /** The vault's name or icon changed (#306): patch the vault list in place. */
   | { t: "org"; name?: string; logo?: string | null }
   /** The vault's appearance defaults changed: the WHOLE settings object. */
-  | { t: "appearance-changed"; orgId?: string; settings: AppearanceSettings; updatedAt?: string }
+  | { t: "appearance-changed"; orgId?: string; settings: VaultAppearanceSettings; updatedAt?: string }
   | ({ t: "presence" } & PresenceState)
   /** A new release exists (#269): a hint to run the normal update check now. */
   | { t: "version-available"; version: string }
@@ -281,7 +281,7 @@ export function parseServerControl(text: string): ServerControl | null {
     return {
       t: "appearance-changed",
       ...(typeof o.orgId === "string" ? { orgId: o.orgId } : {}),
-      settings: parseAppearanceSettings(o.settings),
+      settings: parseVaultAppearanceSettings(o.settings),
       ...(typeof o.updatedAt === "string" ? { updatedAt: o.updatedAt } : {}),
     };
   }

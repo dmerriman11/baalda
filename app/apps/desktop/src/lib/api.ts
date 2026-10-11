@@ -1,4 +1,5 @@
-import { parseAppearanceSettings, type AppearanceSettings } from "./appearanceSettings";
+import type { PinnedItem } from "./pins";
+import { parseVaultAppearanceSettings, type VaultAppearanceSettings } from "./appearanceSettings";
 import type { SeedResultFields } from "./sync/seedRegister";
 import { rememberAvatarImage } from "./avatarIdentity";
 import { parseHealth, type ServerHealth } from "./serverFeatures";
@@ -3259,21 +3260,32 @@ export class ApiClient {
       `/api/orgs/${encodeURIComponent(orgId)}/appearance`,
     );
     return {
-      settings: parseAppearanceSettings(data?.settings),
+      settings: parseVaultAppearanceSettings(data?.settings),
       updatedAt: data?.updatedAt ?? null,
       updatedBy: data?.updatedBy ?? null,
     };
   }
 
+  async toggleVaultPin(orgId: string, pin: PinnedItem): Promise<VaultAppearanceResponse> {
+    const { data } = await this.request<VaultAppearanceResponse>("PATCH", `/api/orgs/${encodeURIComponent(orgId)}/appearance`, { body: { togglePin: pin } });
+    return { ...data, settings: parseVaultAppearanceSettings(data.settings) };
+  }
+
+  /** Change only the supplied shared settings; the server checks owner/admin. */
+  async patchVaultAppearance(orgId: string, settings: VaultAppearanceSettings): Promise<VaultAppearanceResponse> {
+    const { data } = await this.request<VaultAppearanceResponse>("PATCH", `/api/orgs/${encodeURIComponent(orgId)}/appearance`, { body: { settings } });
+    return { ...data, settings: parseVaultAppearanceSettings(data.settings) };
+  }
+
   /** Replace the vault's appearance defaults (owner/admin). */
-  async putVaultAppearance(orgId: string, settings: AppearanceSettings): Promise<VaultAppearanceResponse> {
+  async putVaultAppearance(orgId: string, settings: VaultAppearanceSettings): Promise<VaultAppearanceResponse> {
     const { data } = await this.request<VaultAppearanceResponse>(
       "PUT",
       `/api/orgs/${encodeURIComponent(orgId)}/appearance`,
       { body: { settings } },
     );
     return {
-      settings: parseAppearanceSettings(data?.settings ?? settings),
+      settings: parseVaultAppearanceSettings(data?.settings ?? settings),
       updatedAt: data?.updatedAt ?? null,
       updatedBy: data?.updatedBy ?? null,
     };
@@ -3887,7 +3899,7 @@ export function shareResourceId(s: Share): string {
 }
 
 export interface VaultAppearanceResponse {
-  settings: AppearanceSettings;
+  settings: VaultAppearanceSettings;
   updatedAt: string | null;
   updatedBy: string | null;
 }

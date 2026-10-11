@@ -27,6 +27,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { useStore } from "../store";
 import { viewerFor, type ViewerKind } from "../lib/formats";
 import { HtmlView } from "./HtmlView";
+import { RemoteDashboardView } from "./RemoteDashboardView";
 import { FileCard } from "./viewers/FileCard";
 import { ViewerErrorBoundary } from "./viewers/ErrorBoundary";
 import type { ViewerProps } from "./viewers/types";
@@ -138,12 +139,15 @@ export function FilePreview({ path }: { path: string }) {
     );
   }
 
+  // Text dashboards own their transport; only native binary viewers need the
+  // asset protocol (which the synthetic browser fixture cannot provide).
+  if (viewer === "html") return <HtmlView key={path} path={path} />;
+  if (viewer === "link") return <RemoteDashboardView key={path} path={path} />;
+
   const abs = `${vaultPath.replace(/\/$/, "")}/${path}`;
   const src = convertFileSrc(abs);
   const props: ViewerProps = { path, abs, src };
 
-  // HtmlView owns its own chrome (Preview/Source toggle) and fills the pane.
-  if (viewer === "html") return <HtmlView path={path} />;
   if (viewer === "image" || viewer === "pdf") {
     return <NativeView key={path} {...props} kind={viewer} />;
   }

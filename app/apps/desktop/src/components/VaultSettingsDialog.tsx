@@ -2311,6 +2311,7 @@ function AppearanceTab({ canManage, isSynced }: { canManage: boolean; isSynced: 
   const change = <K extends AppearanceKey>(key: K, value: ResolvedAppearance[K]) => {
     if (!orgId) return;
     const next: AppearanceSettings = {
+      ...useStore.getState().vaultAppearance[orgId],
       ...vaultAppearanceValues(useStore.getState().vaultAppearance[orgId]),
       [key]: value,
     };

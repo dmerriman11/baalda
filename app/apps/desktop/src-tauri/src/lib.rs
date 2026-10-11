@@ -10,6 +10,8 @@ mod clipboard;
 // policy of the bulk sync path — the eligibility table, the path allowlist —
 // and the `#[tauri::command]` wrappers around them are only frame decoding.
 pub mod commands;
+pub mod dashboard;
+mod agent_runner;
 mod error;
 pub mod folder_safety;
 pub mod extract;
@@ -133,6 +135,8 @@ pub fn run() {
     );
 
     builder
+        .manage(agent_runner::AgentRunnerState::default())
+        .register_asynchronous_uri_scheme_protocol("baalda-view", dashboard::handle_request)
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -142,6 +146,7 @@ pub fn run() {
         // account and access — the link carries ids, never content or a grant.
         .plugin(tauri_plugin_deep_link::init())
         .setup(|app| {
+            agent_runner::warm_detection(app.handle());
             // Updater is desktop-only; register it here so mobile builds skip it.
             #[cfg(desktop)]
             app.handle()
@@ -200,6 +205,15 @@ pub fn run() {
         // minting a share link) outlives — a native call has no such rule.
         .manage(clipboard::ClipboardState::default())
         .invoke_handler(tauri::generate_handler![
+            agent_runner::detect_agents,
+            agent_runner::run_agent,
+            agent_runner::cancel_agent,
+            dashboard::query_notes,
+            dashboard::list_notes_by_tag,
+            dashboard::list_notes_by_property,
+            dashboard::dashboard_read_note,
+            dashboard::dashboard_mount_view,
+            dashboard::dashboard_unmount_view,
             clipboard::clipboard_write,
             relaunch::set_background_relaunch,
             relaunch::launched_in_background,

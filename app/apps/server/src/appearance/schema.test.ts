@@ -54,4 +54,18 @@ describe("parseAppearance", () => {
     ];
     for (const s of bad) expect(parseAppearance(s)).toMatchObject({ ok: false, error: "invalid_appearance" });
   });
+  it("accepts shared pins and an optional stable home identity", () => {
+    const navigation = { homeDocId: "home-id", pinnedItems: [{ kind: "note", docId: "note-id" }, { kind: "folder", path: "Projects/Active" }] };
+    expect(parseAppearance(navigation)).toEqual({ ok: true, settings: navigation });
+    expect(parseAppearance({ homeDocId: null, pinnedItems: [] }).ok).toBe(true);
+  });
+  it("refuses unsafe and unbounded navigation values", () => {
+    for (const path of ["../outside", "/absolute", ".context", "a/.context", "a\\b", "a//b", "a/./b", ""]) {
+      expect(parseAppearance({ pinnedItems: [{ kind: "folder", path }] }).ok).toBe(false);
+    }
+    expect(parseAppearance({ homeDocId: "bad/id" }).ok).toBe(false);
+    expect(parseAppearance({ pinnedItems: Array.from({ length: 201 }, () => ({ kind: "note", docId: "id" })) }).ok).toBe(false);
+    expect(parseAppearance({ pinnedItems: [{ kind: "note", docId: "id", extra: true }] }).ok).toBe(false);
+  });
+
 });

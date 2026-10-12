@@ -889,7 +889,7 @@ export class VaultRegistry {
    * Server-only notes this pull did NOT write a placeholder for because a
    * bootstrap download will create them WITH content (PR4). `pathKey(relPath)`
    * → docId, plus the reverse, so both of the bootstrap runner's callbacks
-   * (`markMaterialized(relPath)`, `markPushed(docId)`) clear an entry in O(1).
+   * (`markMaterialized(relPath)`) clear an entry in O(1).
    *
    * In memory ONLY, on purpose: it is never persisted as "done". A killed or
    * interrupted download leaves the files missing on disk, and the next pull's
@@ -1828,12 +1828,10 @@ export class VaultRegistry {
     } catch (e) {
       console.warn("[registry] pushed listener threw", e);
     }
-    // Its content is stored locally now (a bootstrap page, a channel frame):
-    // no placeholder is owed for it any more.
-    if (this.pendingFromBootstrapByDoc.size > 0) {
-      const rp = this.pendingFromBootstrapByDoc.get(docId);
-      if (rp !== undefined) this.clearPendingPath(rp);
-    }
+    // Server confirmation does not prove a local file exists. An empty
+    // content run can be acknowledged without an egest, while this note is
+    // still waiting for its first file. Only markMaterialized (a confirmed
+    // disk write) may discharge that pending arrival.
     if (this.pushed.has(docId)) return;
     this.pushed.add(docId);
     this.checkpoint?.touch();
@@ -3804,7 +3802,14 @@ export class VaultRegistry {
     let serverNotes = noteRegistry.notes;
     let { folders, notes } = flattenTree(workingTree);
     // The paths this device already knew BEFORE this pass (#221 drift report).
-    const priorMappedCi = new Set([...this.byPath.keys()].map((p) => pathKey(p)));
+    // A previous pull may have mapped a new remote note but deferred its
+    // first disk write. Its absence is still an arrival, not evidence of a
+    // local delete or rename. Keep it out of both recovery and rename pairing.
+    const priorMappedCi = new Set(
+      [...this.byPath.keys()]
+        .map((p) => pathKey(p))
+        .filter((p) => !this.pendingFromBootstrap.has(p)),
+    );
     const checkpoint = this.checkpoint ?? this.newCheckpointer();
     // A pull can be the first thing to touch a big vault's map (a reconnect
     // catch-up), so retune here too rather than trusting the construction-time

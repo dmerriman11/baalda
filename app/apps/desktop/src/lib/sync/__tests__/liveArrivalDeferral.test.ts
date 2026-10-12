@@ -49,6 +49,8 @@ import {
 } from "../deferredArrival";
 import { VaultRegistry, type InboundHost } from "../registry";
 import { VaultDocStore } from "../vaultDocStore";
+import { reconcileReport } from "../reconcileReport";
+import { ContentUploader } from "../contentUpload";
 import { reconcileWithTree } from "./helpers/reconcile";
 
 const ORG = "org-1";
@@ -194,6 +196,7 @@ function setup(serverNotes: RegisteredNote[], state: Partial<LiveArrivalState> =
 
 beforeEach(() => {
   vi.clearAllMocks();
+  reconcileReport.clear();
   vi.mocked(ipc.getVaultConfig).mockResolvedValue(null);
   vi.mocked(ipc.listNoteTitles).mockResolvedValue([]);
   vi.mocked(ipc.materializeNotesBatch).mockImplementation(async (items) =>
@@ -227,6 +230,63 @@ describe("small arrivals land with their content, no placeholder first", () => {
     await t.fireTimer();
     expect(placeholders()).toEqual([]);
     expect(t.fs.get("Remote/N0.md")).toBe("Hello from a teammate");
+  });
+
+  it("confirming server content does not strand a new empty note before its file arrives", async () => {
+    const t = setup(serverOnly(1));
+    await t.pull();
+    // A concurrent content run can confirm an empty Y.Doc without writing a
+    // file: flushEgest has no text change to flush. Server confirmation must
+    // not cancel the receiving side's still-owed file creation.
+    const uploader = new ContentUploader({
+      vaultId: VAULT,
+      notes: [{ docId: "srv-0", relPath: "Remote/N0.md" }],
+      isPushed: (id) => t.reg.isPushed(id),
+      markPushed: (id) => t.reg.markPushed(id),
+      deps: {
+        acquire: (id, path) => t.store.promote(id, path, { seedFromFile: false, pin: true }),
+        release: (id) => t.store.demote(id),
+        readFile: (path) => t.fs.readFile(path),
+        connect: ({ doc }) => ({
+          isSynced: true,
+          readOnly: false,
+          whenSynced: async () => { Y.applyUpdate(doc, serverState(""), "remote"); },
+          whenFlushed: async () => true,
+          destroy: () => {},
+        }),
+      },
+    });
+    await uploader.run();
+    expect(uploader.failedDocs()).toEqual([]);
+    expect(t.reg.isPushed("srv-0")).toBe(true);
+    expect(t.fs.get("Remote/N0.md")).toBeUndefined();
+    await t.fireTimer();
+    expect(placeholders()).toEqual(["Remote/N0.md"]);
+    expect(t.reg.pendingFromBootstrapCount()).toBe(0);
+    expect(reconcileReport.items()).toEqual([]);
+  });
+
+  it("another registry event while a new file is arriving never reports a deletion", async () => {
+    const t = setup(serverOnly(1));
+    await t.pull();
+    // A folder create / reauth can request another pull before backfill or the
+    // arrival deadline. Mapped-but-not-created is not deleted from this device.
+    await t.reg.pull();
+    await t.fireTimer();
+    expect(placeholders()).toEqual(["Remote/N0.md"]);
+    expect(reconcileReport.items()).toEqual([]);
+    expect(t.reg.lastPassDrift()?.missingMapped).toBe(0);
+  });
+
+  it("still reports a real removal after the arriving file was created", async () => {
+    const t = setup(serverOnly(1));
+    await t.pull();
+    await t.store.applyUpdate("srv-0", serverState("arrived"));
+    expect(t.reg.pendingFromBootstrapCount()).toBe(0);
+    // The next full disk listing is empty, representing an actual removal
+    // AFTER arrival rather than a file we have not written yet.
+    await t.reg.pull();
+    expect(reconcileReport.items().map((item) => item.kind)).toEqual(["restoredFromServer"]);
   });
 
   it("a 10-note grant is created with content, never as placeholders", async () => {

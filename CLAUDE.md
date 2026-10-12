@@ -383,7 +383,10 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   the download ends however it ends, `materializePendingFromBootstrap` writes create-only
   placeholders for what it did not deliver (the server-empty `ready.empty` class, or a cancelled
   run), re-resolved by `doc_id`. The pending set is memory only, never persisted as done: an
-  interrupted run leaves files missing and the next pull finds them again.
+  interrupted run leaves files missing and the next pull finds them again. A server-content
+  confirmation (`markPushed`) must not clear this pending file creation: an empty Y.Doc can be
+  acknowledged without any disk write. Only confirmed materialization clears it. Pending arrivals
+  are excluded from missing-file recovery notices and offline rename candidates on subsequent pulls.
 - **The open note's "was removed" banner waits** (`lib/openNoteRemoval.ts`, wired in `App.tsx`): a
   rename (in-app, Finder, an AI agent, a folder move) also reports the old path as `removed`, and
   setting the banner on that raw event flashed "was removed" on every rename until the move was

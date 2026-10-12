@@ -25,7 +25,7 @@ it("lists all templates as lazy images without starting dashboard scripts, then 
   expect(host.querySelectorAll("img[loading='lazy']")).toHaveLength(20);
   expect(host.querySelectorAll("iframe")).toHaveLength(0);
   expect(fetch).not.toHaveBeenCalled();
-  await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Preview Tabler"]')!.click());
+  await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Show preview of Tabler"]')!.click());
   expect(host.querySelectorAll("iframe")).toHaveLength(1);
   expect(host.querySelector("iframe")?.title).toBe("Tabler preview");
   await act(async () => [...host.querySelectorAll("button")].find((b) => b.textContent === "← All templates")!.click());
@@ -33,9 +33,14 @@ it("lists all templates as lazy images without starting dashboard scripts, then 
 });
 
 it("opens the saved dashboard only on click while retaining the static card and Current Home label", async () => {
-  await act(async () => root.render(createElement(DashboardTemplateGallery, { onUse:vi.fn(), saved:{tabler:"My dashboard.html"}, currentId:"tabler" })));
+  const onOpen = vi.fn(), onUnset = vi.fn();
+  await act(async () => root.render(createElement(DashboardTemplateGallery, { onUse:vi.fn(), saved:{tabler:"My dashboard.html"}, currentId:"tabler", onOpen, onUnset })));
   expect(host.textContent).toContain("Current Home");
   expect(host.querySelectorAll("iframe")).toHaveLength(0);
-  await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Preview Tabler"]')!.click());
+  await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Show preview of Tabler"]')!.click());
   expect(host.querySelector("iframe")?.title).toBe("My dashboard.html");
+  await act(async () => [...host.querySelectorAll("button")].find((b) => b.textContent === "Open")!.click());
+  expect(onOpen).toHaveBeenCalledWith("My dashboard.html");
+  await act(async () => [...host.querySelectorAll("button")].find((b) => b.textContent === "Unset Home")!.click());
+  expect(onUnset).toHaveBeenCalledOnce();
 });

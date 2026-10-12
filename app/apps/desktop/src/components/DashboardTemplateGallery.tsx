@@ -58,15 +58,30 @@ export function DashboardTemplateGallery({ selectedId, onUse, disabled = false, 
   const categories = ["All styles", ...new Set(DASHBOARD_TEMPLATES.map((t) => t.category).filter(Boolean))];
   const templates = DASHBOARD_TEMPLATES.filter((t) => (category === "All styles" || t.category === category) && `${t.name} ${t.author ?? ""} ${t.description}`.toLowerCase().includes(query.toLowerCase()));
   if (preview) return <div className="dashboard-gallery-expanded">
-    <div className="dashboard-gallery-toolbar"><button type="button" className="secondary" onClick={() => setPreview(null)}>← All templates</button><span><strong>{preview.name}</strong> · {preview.author}</span><button type="button" className="primary" disabled={disabled} onClick={() => { onUse(preview); setPreview(null); }}>Use this template</button></div>
+    <div className="dashboard-gallery-toolbar">
+      <button type="button" className="secondary" onClick={() => setPreview(null)}>← All templates</button>
+      <span><strong>{preview.name}</strong> · {preview.author}</span>
+      <div className="dashboard-gallery-preview-actions">
+        {currentId === preview.id ? <>
+          {onOpen && <button type="button" className="primary" onClick={() => onOpen(saved[preview.id])}>Open</button>}
+          {onUnset && <button type="button" className="secondary" disabled={disabled} onClick={onUnset}>Unset Home</button>}
+        </> : <button type="button" className="primary" disabled={disabled} onClick={() => { onUse(preview); setPreview(null); }}>Use this template</button>}
+      </div>
+    </div>
     {saved[preview.id] ? <VaultDashboardPreview path={saved[preview.id]} /> : <DashboardTemplatePreview template={preview} expanded />}
   </div>;
   return <div className="dashboard-gallery">
     <div className="dashboard-gallery-toolbar"><div className="dashboard-gallery-filters" aria-label="Template styles">{categories.map((c) => <button key={c} type="button" aria-pressed={category === c} onClick={() => setCategory(c)}>{c}</button>)}</div><input aria-label="Search dashboard templates" placeholder="Search templates or designers…" value={query} onChange={(e) => setQuery(e.target.value)} /></div>
     <div className="dashboard-gallery-grid" role="group" aria-label="Dashboard template">
       {templates.map((template) => <article key={template.id} className={`dashboard-gallery-card${selectedId === template.id || currentId === template.id ? " selected" : ""}`}>
-        <button className="dashboard-gallery-picture" type="button" aria-label={`Preview ${template.name}`} onClick={() => setPreview(template)}>{template.thumbnailUrl ? <img className="dashboard-template-thumbnail" src={template.thumbnailUrl} alt="" width={900} height={900} loading="lazy" decoding="async" draggable={false} /> : <div className="dashboard-preview-placeholder" style={{ background:template.palette?.[2] }}>Preview available on click</div>}<span className="dashboard-gallery-preview-label">Preview dashboard ↗</span></button>
-        <div className="dashboard-gallery-card-copy"><div className="dashboard-template-meta"><span>{template.category}</span><span>{template.author}</span></div><h3>{template.name}{currentId === template.id && <span className="dashboard-current-badge">Current Home</span>}</h3><p>{template.description}</p><div className="dashboard-gallery-card-actions">{currentId === template.id ? <><button type="button" className="secondary" onClick={() => onOpen?.(saved[template.id])}>Open</button>{onUnset && <button type="button" className="secondary" disabled={disabled} onClick={onUnset}>Unset Home</button>}</> : <><button type="button" className="secondary" onClick={() => setPreview(template)}>Preview</button><button type="button" className={selectedId === template.id ? "secondary" : "primary"} disabled={disabled} aria-pressed={selectedId === template.id} aria-label={`Use ${template.name}`} onClick={() => onUse(template)}>{selectedId === template.id ? "Selected ✓" : "Use template"}</button></>}</div></div>
+        <div className="dashboard-gallery-picture">
+          {template.thumbnailUrl ? <img className="dashboard-template-thumbnail" src={template.thumbnailUrl} alt="" width={900} height={900} loading="lazy" decoding="async" draggable={false} /> : <div className="dashboard-preview-placeholder" style={{ background: template.palette?.[2] }}>Preview available on click</div>}
+        </div>
+        <h3 className="dashboard-gallery-card-name">{template.name}{currentId === template.id && <span className="dashboard-current-badge">Current Home</span>}</h3>
+        <div className="dashboard-gallery-card-actions">
+          <button type="button" className="secondary" aria-label={`Show preview of ${template.name}`} onClick={() => setPreview(template)}>Show preview</button>
+          {currentId !== template.id && <button type="button" className="primary" disabled={disabled} aria-pressed={selectedId === template.id} aria-label={`Use ${template.name}`} onClick={() => onUse(template)}>{selectedId === template.id ? "Selected ✓" : "Use template"}</button>}
+        </div>
       </article>)}
       {templates.length === 0 && <p className="dashboard-gallery-empty">No templates match. Try another style or search.</p>}
     </div>

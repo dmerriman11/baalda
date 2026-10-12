@@ -102,6 +102,18 @@ import { CAPTURE_FORMAT, startCapture } from "../voice/capture";
 import { VoicePlayer } from "../voice/playback";
 import { VoiceRoster, type VoiceSpeaker } from "../voice/roster";
 import { FailureGrace } from "./failureGrace";
+import { RetryBackoff } from "./retryBackoff";
+import { defaultRefusalStore, scopedRefusalStore } from "./blobRefusals";
+
+/** The server URL that scopes remembered upload refusals; "" when unknown
+ *  (test doubles of `authManager` may not carry it). */
+function refusalServerScope(): string {
+  try {
+    return authManager.getServerUrl() ?? "";
+  } catch {
+    return "";
+  }
+}
 
 export type { VoiceSpeaker };
 
@@ -388,7 +400,11 @@ export class SyncManager implements InboundHost {
     // create, open-note confirm), clears that doc's failure rows: the sidebar
     // badge and the failure list must never disagree.
     // Optional call: test doubles of the registry may not carry it.
-    this.registry.setPushedListener?.((docId) => this.failureGrace.settle(docId));
+    this.registry.setPushedListener?.((docId) => {
+      this.failureGrace.settle(docId);
+      this.retryBackoff.clear(docId);
+      this.accessRetryBackoff.clear(docId);
+    });
     // The registry owns the only {relPath → docId} map there is, and the sidebar
     // needs it to badge a row (every sync fact is keyed by docId). Mirror it out
     // reactively — coalesced — instead of letting the UI read it imperatively
@@ -842,6 +858,21 @@ export class SyncManager implements InboundHost {
   /** Holds transient push failures back until retries run out, and drops any
    *  failure of a doc a later push confirmed (see `failureGrace.ts`). */
   private failureGrace = new FailureGrace();
+  /** Spaces out the BACKGROUND re-queue of a doc whose push keeps failing
+   *  transiently (see `retryBackoff.ts`); cleared by any confirmed push, a
+   *  user retry, an access change and a vault switch. */
+  private retryBackoff = new RetryBackoff();
+  /** Spaces out the access-change re-check of a doc refused for ACCESS: a
+   *  `reauth` also follows a teammate's create, so a still-refused doc must not
+   *  re-mint on every one. Cleared by a confirmed push, a user retry and a vault
+   *  switch — never by the access change itself, which is what it rations. */
+  private accessRetryBackoff = new RetryBackoff();
+  /** A `reauth` that found refused docs still backed off re-checks them when
+   *  the earliest wait ends, so a grant arriving inside the wait is not lost. */
+  private accessRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private backedOff(docId: string): boolean {
+    return this.retryBackoff.isWaiting(docId, Date.now());
+  }
   /** True while the run is reporting the vault channel's inbound queue. */
   private downloadPhase = false;
   /**
@@ -1091,6 +1122,9 @@ export class SyncManager implements InboundHost {
   private logUploadFailure(f: UploadFailure): void {
     this.invalidatedFailures.delete(f.docId);
     this.failureGrace.record(f, Date.now());
+    // A plain transient failure (no permanent verdict, no typed kind such as the
+    // shrink hold) backs the doc off the automatic re-queue.
+    if (!f.permanent && !f.kind) this.retryBackoff.record(f.docId, Date.now());
     this.note(
       // A note the shrink brake holds is waiting, not broken (#274).
       f.kind === "shrink-held" ? "warn" : "error",
@@ -1510,6 +1544,11 @@ export class SyncManager implements InboundHost {
     if (reason === "reauth" || reason === "acl-revoked" || reason === "channel-synced") {
       this.attachments?.recheckEmbedUploads();
     }
+    // Only a real access change (not a plain reconnect) re-offers extracted
+    // text the server refused with a 403.
+    if (reason === "reauth" || reason === "acl-revoked") {
+      this.attachments?.forgetTextRefusals();
+    }
     // Which trigger asked for this pull. A pull that keeps re-arming itself is
     // invisible without this line — the badge just blinks "Syncing" — and the
     // NAME is the whole value: `reauth` vs `registry-frame` is what separated
@@ -1927,6 +1966,8 @@ export class SyncManager implements InboundHost {
     if (!scope.isCurrent()) return;
     this.aclChangedAt = Date.now();
     this.note("info", "reauth", "Permissions changed — re-checking access");
+    // An access change can be exactly what was failing: retry everything now.
+    this.retryBackoff.clearAll();
     // Two things follow from "the ACL moved". The open note re-mints its token so
     // a view<->edit flip lands live...
     this.current?.refreshAccess();
@@ -1938,6 +1979,10 @@ export class SyncManager implements InboundHost {
     // the server refused for access: a grant that lifts the refusal lets those
     // new notes register by themselves.
     this.registry.retryHeldRefusals();
+    // Notes whose push was refused for access are re-asked too: a grant is
+    // exactly what lifts that refusal. Rationed per doc, since `reauth` also
+    // arrives for changes that grant nothing.
+    this.releaseAccessRefusals(scope, { rationed: true });
     this.handleRegistryChanged("reauth");
     // ...and the BINARIES are re-diffed against the server. This is the file
     // half of that same pull, and it has to be asked for separately: the pull
@@ -2220,6 +2265,7 @@ export class SyncManager implements InboundHost {
       this.unhydratedPlaceholders.delete(mapping.docId);
       this.registry.clearUnhydratedPlaceholder?.(mapping.docId);
       this.permanentFailures.delete(mapping.docId);
+      this.retryBackoff.clear(mapping.docId);
       this.invalidatedFailures.delete(mapping.docId);
       this.localChanges.set(mapping.docId, relPath);
       this.note("info", "push-queued", "Changed on disk while closed — checking it against the server", {
@@ -4142,6 +4188,7 @@ export class SyncManager implements InboundHost {
           // fix — neither is work (see the field comments).
           !this.emptyEverywhere.has(n.docId) &&
           !this.permanentFailures.has(n.docId) &&
+          !this.backedOff(n.docId) &&
           (!this.registry.isPushed(n.docId) ||
             this.serverEmpty.has(n.docId) ||
             this.serverBehind.has(n.docId)),
@@ -4576,6 +4623,7 @@ export class SyncManager implements InboundHost {
     const toProbe: Array<{ docId: string; relPath: string }> = [];
     for (const docId of docIds) {
       if (this.emptyEverywhere.has(docId) || this.permanentFailures.has(docId)) continue;
+      if (this.backedOff(docId)) continue;
       const relPath = this.registry.pathForDocId(docId);
       if (!relPath) {
         keep.add(docId);
@@ -5127,6 +5175,8 @@ export class SyncManager implements InboundHost {
     const relPath = this.registry.pathForDocId(docId);
     if (!relPath) return;
     this.note("info", "retry", "Retrying this note", { docId, path: relPath });
+    this.retryBackoff.clear(docId);
+    this.accessRetryBackoff.clear(docId);
     this.permanentFailures.delete(docId);
     this.bulkFailures.delete(docId);
     this.invalidatedFailures.add(docId);
@@ -5151,18 +5201,12 @@ export class SyncManager implements InboundHost {
     if (!this.enabled || !scope || !scope.isCurrent()) return;
     if (this.contentRunInFlight()) return;
     this.note("info", "retry", "Sync now requested");
+    this.retryBackoff.clearAll();
     // Permission refusals are terminal only for the access/state observed by
     // that attempt. A manual check safely re-evaluates them: withdraw the local
     // confirmation so the normal pull-first path compares again. Oversized
     // notes remain terminal because another identical encode cannot help them.
-    for (const [docId, failure] of [...this.permanentFailures]) {
-      if (failure.kind !== "no-write-access" && failure.status !== "no-access") continue;
-      this.permanentFailures.delete(docId);
-      this.bulkFailures.delete(docId);
-      this.invalidatedFailures.add(docId);
-      this.registry.unmarkPushed(docId);
-      this.divergedDocs.add(docId);
-    }
+    this.releaseAccessRefusals(scope, { rationed: false });
     // Creates refused for access are re-asked too, for the same reason.
     this.registry.retryHeldRefusals();
     // The old uploader's failure list belongs to the run being retried; keeping
@@ -5180,6 +5224,53 @@ export class SyncManager implements InboundHost {
     if (!scope.isCurrent()) return;
     if (changed) this.onRegistryChanged?.();
     this.settleAfterPull(scope);
+  }
+
+  /**
+   * Forget the permanent failures an access change can lift — a push refused
+   * for access (`no-access`) or for write access (`no-write-access`) — and
+   * withdraw the local confirmation so the normal pull-first pass compares
+   * again. Oversized and deleted notes stay terminal: no grant changes them.
+   *
+   * `rationed` (the `reauth` path) spaces each doc's re-check by
+   * {@link accessRetryBackoff}: a doc still refused fails again, permanently,
+   * with one token mint and no loop, and is next re-asked only once its wait
+   * ends. A doc skipped for its wait arms one timer at the earliest end, so a
+   * real grant inside the wait is picked up then. "Sync now" is unrationed.
+   * Returns how many docs were released.
+   */
+  private releaseAccessRefusals(scope: VaultScope, opts: { rationed: boolean }): number {
+    const now = Date.now();
+    let released = 0;
+    let earliestWait = Infinity;
+    for (const [docId, failure] of [...this.permanentFailures]) {
+      if (failure.kind !== "no-write-access" && failure.status !== "no-access") continue;
+      if (opts.rationed) {
+        if (this.accessRetryBackoff.isWaiting(docId, now)) {
+          earliestWait = Math.min(earliestWait, this.accessRetryBackoff.nextAt(docId) ?? now);
+          continue;
+        }
+        this.accessRetryBackoff.record(docId, now);
+      } else {
+        this.accessRetryBackoff.clear(docId);
+      }
+      this.permanentFailures.delete(docId);
+      this.bulkFailures.delete(docId);
+      this.invalidatedFailures.add(docId);
+      this.registry.unmarkPushed(docId);
+      this.divergedDocs.add(docId);
+      released++;
+    }
+    if (opts.rationed && earliestWait !== Infinity && !this.accessRetryTimer) {
+      this.accessRetryTimer = setTimeout(() => {
+        this.accessRetryTimer = null;
+        if (!this.enabled || !scope.isCurrent()) return;
+        if (this.releaseAccessRefusals(scope, { rationed: true }) > 0) {
+          this.handleRegistryChanged("reauth");
+        }
+      }, Math.max(0, earliestWait - now));
+    }
+    return released;
   }
 
   /**
@@ -5362,6 +5453,7 @@ export class SyncManager implements InboundHost {
           // owned by the per-doc follow-up — none of them are work here.
           !this.emptyEverywhere.has(n.docId) &&
           !this.permanentFailures.has(n.docId) &&
+          !this.backedOff(n.docId) &&
           !conflicts.has(n.docId) &&
           (serverEmpty.has(n.docId) ||
             this.serverBehind.has(n.docId) ||
@@ -5499,6 +5591,7 @@ export class SyncManager implements InboundHost {
     const progress = this.progress;
     if (!progress || docIds.length === 0) return;
     const notes = docIds
+      .filter((docId) => !this.backedOff(docId))
       .map((docId) => ({ docId, relPath: this.registry.pathForDocId(docId) }))
       .filter((n): n is { docId: string; relPath: string } => n.relPath != null);
     if (notes.length === 0) return;
@@ -6155,6 +6248,12 @@ export class SyncManager implements InboundHost {
     this.permanentFailures.clear();
     this.invalidatedFailures.clear();
     this.failureGrace.clear();
+    this.retryBackoff.clearAll();
+    this.accessRetryBackoff.clearAll();
+    if (this.accessRetryTimer) {
+      clearTimeout(this.accessRetryTimer);
+      this.accessRetryTimer = null;
+    }
     this.unhydratedPlaceholders.clear();
     this.emptyProbe = null; // a probe still in flight sees a stale scope and drops
     // The bulk run before the engine it borrows from: `stop()` makes every pool
@@ -6852,6 +6951,8 @@ export class SyncManager implements InboundHost {
       // A vanished vault root (#221) stops the binary mirror too: a download
       // would re-create the old folder, a missing file would read as a delete.
       isCurrent: () => scope.isCurrent() && !this.rootMissing,
+      // Lasting upload refusals, remembered per (server, vault) only.
+      refusals: scopedRefusalStore(defaultRefusalStore(), `${refusalServerScope()}|${vaultId}`),
       // The WHOLE vault, not just `attachments/`: a `.docx` in `Team/` is a
       // blob like any other since it got its own `files` row (PR3 Stage A).
       listLocal: () => ipc.listBinaries(epoch),

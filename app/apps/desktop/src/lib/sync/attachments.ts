@@ -69,6 +69,13 @@ import { announceAttachmentArrived } from "../attachmentArrivals";
 import { formatFor, isNoteExt, mimeForPath as mimeForFormat } from "../formats";
 import { isTransientPath, pathKey } from "../pathIdentity";
 import { BATCH_MAX_FILES, runPool, useBulkPath } from "./pool";
+import {
+  bytesRefusalKey,
+  defaultRefusalStore,
+  TEXT_REFUSAL_PREFIX,
+  textRefusalKey,
+  type RefusalStore,
+} from "./blobRefusals";
 import { reconcileReport } from "./reconcileReport";
 import type { DocSyncState } from "./vaultScope";
 import type {
@@ -987,6 +994,12 @@ export interface AttachmentSyncDeps {
     chars: number;
     content: string;
   }) => Promise<void>;
+  /**
+   * Where refusals that outlive this instance are kept (see `blobRefusals.ts`).
+   * Defaults to the app-wide persistent store, or a private in-memory one when
+   * there is no storage (tests).
+   */
+  refusals?: RefusalStore;
 }
 
 export interface ReconcileResult {
@@ -1043,6 +1056,8 @@ export class AttachmentSync {
    * than path so a rename does not resurrect the attempt.
    */
   private readonly permanentSkips = new Set<string>();
+  /** {@link permanentSkips} and the text refusals, beyond this instance. */
+  private readonly refusals: RefusalStore;
   /**
    * `attachments/` drops the server refused with a 403 (no write access here),
    * by sha → when to ask again. NOT a permanent skip: access is a setting an
@@ -1097,6 +1112,9 @@ export class AttachmentSync {
   /** Blobs whose text this session has already sent (or permanently failed to
    *  send). Keyed by blob id: text describes BYTES, so one send per blob. */
   private readonly textDone = new Set<string>();
+  /** Blobs whose text the server refused (403) this session — released from
+   *  {@link textDone} by an access change. */
+  private readonly textRefused = new Set<string>();
   /** Paths waiting for a text pass, and its own debounce — deliberately
    *  separate from the byte mirror's, so extraction never delays an upload. */
   private pendingText = new Set<string>();
@@ -1117,7 +1135,29 @@ export class AttachmentSync {
     private readonly setTimeoutImpl: (fn: () => void, ms: number) => ReturnType<typeof setTimeout> = (fn, ms) =>
       setTimeout(fn, ms),
     private readonly clearTimeoutImpl: (t: ReturnType<typeof setTimeout>) => void = (t) => clearTimeout(t),
-  ) {}
+  ) {
+    this.refusals = deps.refusals ?? defaultRefusalStore();
+  }
+
+  /** Has the server refused these bytes for good (this session or a recent one)? */
+  private isPermanentlySkipped(sha256: string): boolean {
+    if (this.permanentSkips.has(sha256)) return true;
+    if (!sha256 || !this.refusals.has(bytesRefusalKey(sha256))) return false;
+    this.permanentSkips.add(sha256);
+    return true;
+  }
+
+  /** Record a refusal retrying cannot change. Keyed by content: changed bytes
+   *  are a new sha and are tried again at once. */
+  private skipPermanently(sha256: string): void {
+    this.permanentSkips.add(sha256);
+    if (sha256) this.refusals.add(bytesRefusalKey(sha256));
+  }
+
+  private forgiveSkip(sha256: string): void {
+    this.permanentSkips.delete(sha256);
+    if (sha256) this.refusals.delete(bytesRefusalKey(sha256));
+  }
 
   /** Is the vault this sync belongs to still the open one? */
   private current(): boolean {
@@ -1192,7 +1232,7 @@ export class AttachmentSync {
     }
     try {
       for (const a of await this.deps.listLocal()) {
-        if (wanted.has(pathKey(a.relPath))) this.permanentSkips.delete(a.sha256);
+        if (wanted.has(pathKey(a.relPath))) this.forgiveSkip(a.sha256);
       }
     } catch {
       // No listing, no shas to forgive; the pass below reports the same failure.
@@ -1295,6 +1335,19 @@ export class AttachmentSync {
       this.running = false;
       if (this.rerun && this.current()) this.scheduleReconcile();
     }
+  }
+
+  /**
+   * This user's write access changed (an ACL frame, a reauth): extracted text
+   * refused with a 403 may be accepted now. Forgets those refusals — here and
+   * in the persistent store — so each blob is offered once more on its next
+   * index batch. Deliberately NOT part of {@link recheckEmbedUploads}, which
+   * also runs on every channel reconnect and would re-ask on each one.
+   */
+  forgetTextRefusals(): void {
+    this.refusals.deletePrefix(TEXT_REFUSAL_PREFIX);
+    for (const id of this.textRefused) this.textDone.delete(id);
+    this.textRefused.clear();
   }
 
   /**
@@ -1466,7 +1519,7 @@ export class AttachmentSync {
         if (this.unreadable.has(pathKey(a.relPath))) continue;
         this.fileStates.set(
           a.relPath,
-          this.permanentSkips.has(a.sha256)
+          this.isPermanentlySkipped(a.sha256)
             ? "error"
             : queued.has(a.relPath)
               ? "queued"
@@ -1509,7 +1562,7 @@ export class AttachmentSync {
         // A file the server has already refused for good (too large, wrong type)
         // is skipped without a round trip — see `permanentSkips`.
         if (this.attachmentSyncBlocked && !isUnderAttachments(a.relPath)) return;
-        if (this.permanentSkips.has(a.sha256)) return;
+        if (this.isPermanentlySkipped(a.sha256)) return;
         const refusedUntil = this.embedRefusedUntil.get(a.sha256);
         if (refusedUntil !== undefined) {
           if (Date.now() < refusedUntil) return;
@@ -1559,6 +1612,18 @@ export class AttachmentSync {
           }
           if (this.handleAttachmentSyncRequired(e)) return;
           if (e instanceof AbortPass && e.reason === "attachment_sync_requires_pro") return;
+          const failed = errStatus(e);
+          if (failed === 413 || failed === 415) {
+            // Too large / wrong type from the byte route itself (the legacy
+            // POST, a PUT or `complete`), not the intent: the same answer for
+            // these bytes on every pass, so the same permanent skip.
+            this.skipPermanently(a.sha256);
+            this.setFileState(a.relPath, "error");
+            console.warn(
+              `[attachments] ${a.relPath} refused permanently (${failed} ${errCode(e) ?? "?"}) — skipping`,
+            );
+            return;
+          }
           // A lapsed Team account is read-only, not a broken file: no error row.
           if (e instanceof AbortPass && e.reason === "account_read_only") {
             this.setFileState(a.relPath, "queued");
@@ -1800,7 +1865,7 @@ export class AttachmentSync {
       await this.uploadBySha.get(a.sha256);
       if (!this.current()) return false;
       // The lane ahead may have learned these bytes are refused for good.
-      if (this.permanentSkips.has(a.sha256)) return false;
+      if (this.isPermanentlySkipped(a.sha256)) return false;
     }
     let release!: () => void;
     const claim = new Promise<void>((resolve) => (release = resolve));
@@ -1950,7 +2015,13 @@ export class AttachmentSync {
         // session, the file badged `syncing` with a registered row and no bytes
         // behind it. As a skip they badge `error`, and Retry (`retryFiles`)
         // or the next launch asks once more — bounded, and visible.
-        this.permanentSkips.add(a.sha256);
+        //
+        // 413/415/400 are about THESE BYTES (or this request for them) and are
+        // remembered beyond this instance, so the next session start does not
+        // ask again; a 403 is about access, which an owner can change, so it
+        // stays a session-only skip.
+        if (status === 403) this.permanentSkips.add(a.sha256);
+        else this.skipPermanently(a.sha256);
         console.warn(
           `[attachments] ${a.relPath} refused permanently (${status} ${errCode(e) ?? "?"}) — skipping`,
         );
@@ -2383,7 +2454,7 @@ export class AttachmentSync {
     for (const a of toUpload) {
       if (!this.current()) return;
       if (isUnderAttachments(a.relPath)) continue;
-      if (this.permanentSkips.has(a.sha256)) continue;
+      if (this.isPermanentlySkipped(a.sha256)) continue;
       if (this.registerRefused.has(a.relPath)) continue;
       if (this.fileIds.get(a.relPath) ?? this.deps.knownFileId?.(a.relPath)) continue;
       // The arrival half of a rename the delete queue is still pairing must not
@@ -2718,6 +2789,7 @@ export class AttachmentSync {
         // completion re-queues this path.
         if (!blobId) return;
         if (this.textDone.has(blobId)) return;
+        if (this.refusals.has(textRefusalKey(blobId))) return;
         const content = capText(text.text);
         // Claimed BEFORE the send, not after: text describes BYTES, and two
         // paths holding the same bytes are now in flight at the same time. The
@@ -2738,6 +2810,17 @@ export class AttachmentSync {
             this.textSupported = false;
             this.pendingText.clear();
             console.warn("[attachments] server takes no extracted text — stopping for this session");
+            return;
+          }
+          if (status === 403) {
+            // No write access to this blob (a view-only member, or a file in a
+            // folder they may only read). Its uploader sends the text; asking
+            // again on every index batch and every session start is a
+            // guaranteed 403 each time. Kept claimed, and remembered until an
+            // access change (`forgetTextRefusals`) or the refusal expires.
+            this.refusals.add(textRefusalKey(blobId));
+            this.textRefused.add(blobId);
+            console.warn(`[attachments] ${relPath} text refused (403) — not retrying until access changes`);
             return;
           }
           if (status === 413 || status === 409) {

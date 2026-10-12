@@ -688,6 +688,34 @@ describe("extracted text upload", () => {
     expect(uploadText).toHaveBeenCalledTimes(1);
   });
 
+  it("a 403 (no write access) is not retried — this session or the next — until access changes", async () => {
+    const { createRefusalStore } = await import("../blobRefusals");
+    const refusals = createRefusalStore();
+    const uploadText = vi.fn(async () => {
+      throw serverError(403);
+    });
+    const a = makeVault([{ relPath: "Team/view-only.docx" }], { uploadText, refusals });
+    await a.sync.reconcile();
+    await a.fire();
+    a.sync.handleFilesIndexed(["Team/view-only.docx"]);
+    await a.fire();
+    expect(uploadText).toHaveBeenCalledTimes(1);
+
+    // The next session start (a new instance over the same store) stays quiet.
+    const b = makeVault([{ relPath: "Team/view-only.docx" }], { uploadText, refusals });
+    await b.sync.reconcile();
+    await b.fire();
+    b.sync.handleFilesIndexed(["Team/view-only.docx"]);
+    await b.fire();
+    expect(uploadText).toHaveBeenCalledTimes(1);
+
+    // An access change lets it ask once more.
+    b.sync.forgetTextRefusals();
+    b.sync.handleFilesIndexed(["Team/view-only.docx"]);
+    await b.fire();
+    expect(uploadText).toHaveBeenCalledTimes(2);
+  });
+
   it("caps what it sends at a million characters, on a character boundary", async () => {
     const { sync, log, fire } = makeVault([{ relPath: "Team/big.docx" }], {
       fileText: async () => ({

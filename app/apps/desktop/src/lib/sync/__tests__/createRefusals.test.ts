@@ -24,7 +24,12 @@ vi.mock("../../toast", () => ({ toast: vi.fn() }));
 import { ApiError, type ApiClient } from "../../api";
 import * as ipc from "../../ipc";
 import type { TreeNode } from "../../ipc";
-import { HELD_REFUSAL_RETRY_MS, VaultRegistry } from "../registry";
+import {
+  HELD_REFUSAL_MAX_MS,
+  HELD_REFUSAL_RETRY_MS,
+  VaultRegistry,
+  heldRefusalDelayMs,
+} from "../registry";
 import { fullTree, reconcileWithTree } from "./helpers/reconcile";
 
 const ORG = "org-1";
@@ -54,6 +59,8 @@ function fakeApi() {
   const notes: Array<{ id: string; rel_path: string }> = [];
   const folders = [{ id: "f-reports", path: "Reports" }];
   let writable = false;
+  /** Set to refuse `Odd/` notes with this (non-access) code. */
+  let oddCode: string | null = null;
   const api = {
     listVaults: vi.fn(async () => [{ id: "v1", name: "v", organization_id: ORG }]),
     createVault: vi.fn(),
@@ -71,6 +78,9 @@ function fakeApi() {
     listNoteRegistry: vi.fn(async () => ({ notes, tombstones: [] })),
     listNoteRegistryPaged: vi.fn(async () => ({ notes, tombstones: [] })),
     createNote: vi.fn(async (input: { relPath: string; docId?: string }) => {
+      if (oddCode && input.relPath.startsWith("Odd/")) {
+        throw new ApiError(400, "Bad Request", { code: oddCode });
+      }
       if (!writable && input.relPath.startsWith("Reports/")) {
         throw new ApiError(403, "Forbidden", { code: "no_write_access" });
       }
@@ -81,6 +91,9 @@ function fakeApi() {
     updateFolder: vi.fn(async () => ({})),
     grant: () => {
       writable = true;
+    },
+    refuseOdd: (code: string | null) => {
+      oddCode = code;
     },
   };
   return api;
@@ -97,8 +110,9 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-async function setup(paths: string[]) {
+async function setup(paths: string[], oddCode: string | null = null) {
   const api = fakeApi();
+  api.refuseOdd(oddCode);
   const reg = new VaultRegistry(api as unknown as ApiClient);
   vi.mocked(ipc.listTree).mockResolvedValue(fullTree(tree(paths)));
   await reconcileWithTree(reg, { organizationId: ORG, vaultName: "v" }, tree(paths));
@@ -137,11 +151,77 @@ describe("VaultRegistry — creates refused for access", () => {
     vi.setSystemTime(Date.now() + 2000);
     await reg.pull();
     expect(reportsCreates(api)).toBe(2);
-    // Refused again: held again, backoff restarted.
+    // Refused again: held again, for twice as long.
     await reg.pull();
     expect(reportsCreates(api)).toBe(2);
     expect(reg.heldRefusals()).toHaveLength(1);
   });
+
+  it("doubles the hold on each refused re-ask, capped", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const { api, reg } = await setup(["Reports/a.md"]);
+    const step = async (ms: number) => {
+      vi.setSystemTime(Date.now() + ms);
+      await reg.pull();
+    };
+    await step(HELD_REFUSAL_RETRY_MS + 1000);
+    expect(reportsCreates(api)).toBe(2);
+    // Second refusal: 20 min, so 10 min later is still held.
+    await step(HELD_REFUSAL_RETRY_MS + 1000);
+    expect(reportsCreates(api)).toBe(2);
+    await step(HELD_REFUSAL_RETRY_MS);
+    expect(reportsCreates(api)).toBe(3);
+    // Third: 40 min.
+    await step(2 * HELD_REFUSAL_RETRY_MS + 1000);
+    expect(reportsCreates(api)).toBe(3);
+    await step(2 * HELD_REFUSAL_RETRY_MS);
+    expect(reportsCreates(api)).toBe(4);
+
+    expect(heldRefusalDelayMs(1, HELD_REFUSAL_RETRY_MS)).toBe(HELD_REFUSAL_RETRY_MS);
+    expect(heldRefusalDelayMs(3, HELD_REFUSAL_RETRY_MS)).toBe(4 * HELD_REFUSAL_RETRY_MS);
+    expect(heldRefusalDelayMs(50, HELD_REFUSAL_RETRY_MS)).toBe(HELD_REFUSAL_MAX_MS);
+  });
+
+  it("re-asks at once on an access change however long the backoff has grown", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const { api, reg } = await setup(["Reports/a.md"]);
+    for (let i = 0; i < 4; i++) {
+      reg.retryHeldRefusals();
+      await reg.pull();
+    }
+    expect(reportsCreates(api)).toBe(5);
+    api.grant();
+    reg.retryHeldRefusals();
+    await reg.pull();
+    expect(reg.getMapping("Reports/a.md")).not.toBeNull();
+    expect(reg.hasFailures()).toBe(false);
+  });
+
+  it.each(["path_folder_mismatch", "note_limit_reached", "doc_id_conflict", "invalid_state", "note_too_large"])(
+    "holds a %s refusal too, without calling it an access refusal",
+    async (code) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      const { api, reg } = await setup(["Odd/a.md", "ok.md"], code);
+      const oddCreates = () => api.createNote.mock.calls.filter((c) => c[0].relPath.startsWith("Odd/")).length;
+      expect(oddCreates()).toBe(1);
+      for (let i = 0; i < 3; i++) await reg.pull();
+      expect(oddCreates()).toBe(1);
+      // Still reported, but not on the access banner.
+      const odd = reg.failures().filter((f) => f.path.startsWith("Odd/"));
+      expect(odd.map((f) => [f.path, f.code])).toEqual([["Odd/a.md", code]]);
+      expect(reg.heldRefusals()).toEqual([]);
+      if (code === "note_limit_reached") expect(reg.limitCode()).toBe("note_limit_reached");
+      vi.setSystemTime(Date.now() + HELD_REFUSAL_RETRY_MS + 1000);
+      await reg.pull();
+      expect(oddCreates()).toBe(2);
+      // Answered differently: registers, and the hold (with its backoff) goes.
+      api.refuseOdd(null);
+      reg.retryHeldRefusals();
+      await reg.pull();
+      expect(reg.getMapping("Odd/a.md")).not.toBeNull();
+      expect(reg.failures().filter((f) => f.path.startsWith("Odd/"))).toEqual([]);
+    },
+  );
 
   it("registers by itself once access changes", async () => {
     const { api, reg } = await setup(["Reports/a.md", "Reports/b.md"]);

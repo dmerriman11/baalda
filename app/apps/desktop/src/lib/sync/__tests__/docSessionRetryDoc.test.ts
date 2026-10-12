@@ -502,3 +502,60 @@ describe("SyncManager.prepareSharedHome", () => {
     expect(connects.order).toEqual([]);
   });
 });
+
+describe("SyncManager access change (reauth) and permanent refusals", () => {
+  type Internals = { permanentFailures: Map<string, { docId: string; relPath: string; reason: string; permanent?: boolean; kind?: string; status?: string }> };
+  const failures = (sm: SyncManager) => (sm as unknown as Internals).permanentFailures;
+  const refuse = (sm: SyncManager, docId: string, extra: { status?: string; kind?: string }) =>
+    failures(sm).set(docId, { docId, relPath: `${docId}.md`, reason: "refused", permanent: true, ...extra });
+
+  it("re-asks only access refusals, and rations a doc that is still refused", async () => {
+    const sm = manager();
+    await enable(sm);
+    refuse(sm, "doc-no-access", { status: "no-access" });
+    refuse(sm, "doc-read-only", { kind: "no-write-access" });
+    refuse(sm, "doc-too-large", { kind: "too-large" });
+    refuse(sm, "doc-deleted", { status: "deleted" });
+
+    engineHooks.opts!.onAclChanged!();
+    // Access refusals are forgotten and their confirmation withdrawn; the
+    // terminal kinds no grant can change stay put.
+    expect([...failures(sm).keys()].sort()).toEqual(["doc-deleted", "doc-too-large"]);
+    expect(fakeRegistry.unmarkPushed).toHaveBeenCalledWith("doc-no-access");
+    expect(fakeRegistry.unmarkPushed).toHaveBeenCalledWith("doc-read-only");
+    expect(fakeRegistry.unmarkPushed).not.toHaveBeenCalledWith("doc-too-large");
+
+    // Still refused: the push fails again, permanently. A burst of `reauth`
+    // frames (a teammate's creates) must not re-mint it on every one.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    try {
+      refuse(sm, "doc-no-access", { status: "no-access" });
+      fakeRegistry.unmarkPushed.mockClear();
+      engineHooks.opts!.onAclChanged!();
+      engineHooks.opts!.onAclChanged!();
+      expect(failures(sm).has("doc-no-access")).toBe(true);
+      expect(fakeRegistry.unmarkPushed).not.toHaveBeenCalledWith("doc-no-access");
+
+      // When the wait ends it is re-asked once, without needing another frame,
+      // so a grant that landed inside the wait is not lost.
+      vi.advanceTimersByTime(60_000);
+      expect(failures(sm).has("doc-no-access")).toBe(false);
+      expect(fakeRegistry.unmarkPushed).toHaveBeenCalledWith("doc-no-access");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("Sync now re-asks an access refusal regardless of the access-change wait", async () => {
+    const sm = manager();
+    await enable(sm);
+    refuse(sm, "doc-no-access", { status: "no-access" });
+    engineHooks.opts!.onAclChanged!();
+    refuse(sm, "doc-no-access", { status: "no-access" });
+    engineHooks.opts!.onAclChanged!();
+    expect(failures(sm).has("doc-no-access")).toBe(true);
+
+    await sm.retrySync();
+    expect(failures(sm).has("doc-no-access")).toBe(false);
+  });
+});

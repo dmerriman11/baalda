@@ -74,6 +74,10 @@ export interface DocPush {
   readonly readOnly: boolean;
   /** True once the initial server sync genuinely completed. */
   readonly isSynced: boolean;
+  /** The connection's current sync status (`DocSync.status`). Optional so test
+   *  doubles need not carry it; read after the initial-sync wait so a terminal
+   *  verdict that landed as the wait ended is not reported as a timeout. */
+  readonly status?: string;
   /** Resolve when the initial sync lands, or after `timeoutMs` either way.
    *  Rejects with a {@link TerminalSyncError} the moment the doc turns terminal. */
   whenSynced(timeoutMs: number): Promise<void>;
@@ -617,6 +621,14 @@ export class ContentUploader {
       await push.whenSynced(this.syncTimeoutMs);
       if (this.shouldStop()) return false;
       if (!push.isSynced) {
+        // A terminal verdict (token mint refused 403/404, over the cap) that the
+        // wait did not reject on — it landed as the timeout fired — is still a
+        // permanent refusal, never a "did not respond" that the session re-queues
+        // on every `ready` (four sockets every ~10 s, forever).
+        const st = push.status;
+        if (st === "no-access" || st === "deleted" || st === "too-large") {
+          throw new TerminalSyncError(st);
+        }
         // The timeout elapsed without a real sync (offline / server down). We
         // deliberately do NOT seed here: seeding on an unverified pull is exactly
         // how a local orphan is created that later merges into real server content

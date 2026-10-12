@@ -594,6 +594,34 @@ const frozenRootNotified = new Set<string>();
  * backstop for a grant whose announcement never reached this device.
  */
 export const HELD_REFUSAL_RETRY_MS = 10 * 60_000;
+/** Each refused re-ask doubles the hold (10 → 20 → 40 min …), up to this. */
+export const HELD_REFUSAL_MAX_MS = 6 * 60 * 60_000;
+/** First hold for a create that failed for no stated reason (network, 5xx). */
+export const HELD_TRANSIENT_RETRY_MS = 60_000;
+/** A transient hold doubles up to this, not to {@link HELD_REFUSAL_MAX_MS}: a
+ *  server that was briefly down must not leave a new note unsynced for hours. */
+export const HELD_TRANSIENT_MAX_MS = 60 * 60_000;
+
+/**
+ * Per-note create refusals that will not change on the next pull either, so
+ * they are held and backed off like the access ones, not re-sent (with freshly
+ * built Yjs state) on every pass. Unlike `isHeldCreateCode` these are not about
+ * access: they never reach the create-refusal banner.
+ */
+const BACKOFF_CREATE_CODES = new Set([
+  "path_folder_mismatch",
+  "note_limit_reached",
+  "doc_id_conflict",
+  "invalid_state",
+  "too_large",
+  "note_too_large",
+]);
+
+/** How long a hold lasts after `attempts` refused asks starting at `baseMs`. */
+export function heldRefusalDelayMs(attempts: number, baseMs: number): number {
+  const cap = baseMs <= HELD_TRANSIENT_RETRY_MS ? HELD_TRANSIENT_MAX_MS : HELD_REFUSAL_MAX_MS;
+  return Math.min(baseMs * 2 ** Math.max(0, Math.min(attempts - 1, 30)), cap);
+}
 
 /**
  * How many inbound REMOVALS run at once.
@@ -1037,11 +1065,18 @@ export class VaultRegistry {
    * the per-pass `failed` reset (they are still true until access changes), so
    * the vault never reads "Synced" while they stand; and they are NOT re-sent on
    * every pull — the answer cannot change until access does. They are asked
-   * again after {@link HELD_REFUSAL_RETRY_MS}, or at once when access changes
-   * ({@link retryHeldRefusals}). An entry leaves when its path registers or
-   * leaves the disk; wholesale on `reset`.
+   * again after {@link HELD_REFUSAL_RETRY_MS}, doubling per refused ask up to
+   * {@link HELD_REFUSAL_MAX_MS}, or at once when access changes
+   * ({@link retryHeldRefusals}). The other lasting per-note refusals
+   * (`BACKOFF_CREATE_CODES`) and transient batch failures (from
+   * {@link HELD_TRANSIENT_RETRY_MS}) are held the same way. An entry leaves
+   * (and its backoff with it) when its path registers or leaves the disk;
+   * wholesale on `reset`.
    */
-  private heldRefused = new Map<string, { failure: RegistryFailure; at: number }>();
+  private heldRefused = new Map<
+    string,
+    { failure: RegistryFailure; at: number; attempts: number; baseMs: number }
+  >();
   /**
    * Paths THIS device just created as materialized placeholders, awaiting their
    * own watcher echo (see {@link consumeMaterialized}).
@@ -1981,7 +2016,9 @@ export class VaultRegistry {
 
   /** Creates the server refused for access, still standing (see {@link heldRefused}). */
   heldRefusals(): RegistryFailure[] {
-    return [...this.heldRefused.values()].map((e) => e.failure);
+    return [...this.heldRefused.values()]
+      .filter((e) => isHeldCreateCode(e.failure.code))
+      .map((e) => e.failure);
   }
 
   /**
@@ -2022,7 +2059,7 @@ export class VaultRegistry {
     let key = pathKey(path);
     for (;;) {
       const e = this.heldRefused.get(key);
-      if (e != null && now - e.at < HELD_REFUSAL_RETRY_MS) return true;
+      if (e != null && now - e.at < heldRefusalDelayMs(e.attempts, e.baseMs)) return true;
       const i = key.lastIndexOf("/");
       if (i === -1) return false;
       key = key.slice(0, i);
@@ -2036,7 +2073,14 @@ export class VaultRegistry {
 
   /** The plan-limit code that stopped the run, if one did. */
   limitCode(): string | null {
-    return this.limitReached ?? this.failed.find(f => f.code === "note_limit_reached")?.code ?? null;
+    return (
+      this.limitReached ??
+      this.failed.find((f) => f.code === "note_limit_reached")?.code ??
+      // Held, so not re-asked (or re-reported) this pass, but still true.
+      ([...this.heldRefused.values()].some((e) => e.failure.code === "note_limit_reached")
+        ? "note_limit_reached"
+        : null)
+    );
   }
 
   /**
@@ -2047,7 +2091,7 @@ export class VaultRegistry {
    * same "N items not synced" surface as a failed create, or a refusal that
    * protected the user's notes would be invisible to them.
    */
-  recordFailure(f: RegistryFailure): "ok" | "failed" {
+  recordFailure(f: RegistryFailure, opts?: { holdTransient?: boolean }): "ok" | "failed" {
     if (f.kind === "folder" && f.code === "no_write_access") {
       this.noWriteFolderRefusals.add(pathKey(f.path));
     }
@@ -2079,9 +2123,23 @@ export class VaultRegistry {
         reason: "deleted on the server by another member — kept on this device, no longer synced",
       };
     }
-    if (isHeldCreateCode(f.code) && (f.kind === "note" || f.kind === "folder")) {
-      const firstTime = !this.heldRefused.has(pathKey(f.path));
-      this.heldRefused.set(pathKey(f.path), { failure: f, at: Date.now() });
+    const holdBase =
+      f.kind !== "note" && f.kind !== "folder"
+        ? null
+        : isHeldCreateCode(f.code) || (f.kind === "note" && f.code != null && BACKOFF_CREATE_CODES.has(f.code))
+          ? HELD_REFUSAL_RETRY_MS
+          : opts?.holdTransient
+            ? HELD_TRANSIENT_RETRY_MS
+            : null;
+    if (holdBase != null) {
+      const prev = this.heldRefused.get(pathKey(f.path));
+      const firstTime = prev == null;
+      this.heldRefused.set(pathKey(f.path), {
+        failure: f,
+        at: Date.now(),
+        attempts: (prev?.attempts ?? 0) + 1,
+        baseMs: holdBase,
+      });
       // A re-ask that got the same answer is not news.
       if (!firstTime) {
         if (f.docId) this.sink.doc(f.docId, "error");
@@ -4866,7 +4924,7 @@ export class VaultRegistry {
               docId: ctx.idByPath.get(n.path) ?? null,
               reason: reasonOf(out.error),
               code: errorCode(out.error),
-            }));
+            }, { holdTransient: true }));
           }
           return mutated;
         }
@@ -4899,7 +4957,7 @@ export class VaultRegistry {
               docId: localDocId,
               reason: "the server did not answer for this note",
               code: null,
-            }));
+            }, { holdTransient: true }));
             continue;
           }
           if (res.status === "created" || res.status === "adopted") {
@@ -4925,7 +4983,7 @@ export class VaultRegistry {
                 docId: localDocId,
                 reason: "the server registered this note without an id",
                 code: null,
-              }));
+              }, { holdTransient: true }));
               continue;
             }
             // Keep `rp` (the local spelling) even when the server adopted a
@@ -4980,7 +5038,7 @@ export class VaultRegistry {
             docId: localDocId,
             reason: res.error ?? res.code ?? "the server refused this note",
             code: res.code ?? null,
-          }));
+          }, { holdTransient: true }));
         }
         this.announceCreated(createdInChunk);
         await this.settleSeeded(seededNow);

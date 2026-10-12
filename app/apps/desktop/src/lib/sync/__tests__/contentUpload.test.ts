@@ -57,6 +57,9 @@ interface PushBehaviour {
   neverFlushed?: Set<string>;
   /** Docs whose provider turns terminal (`deleted` / `no-access`) mid-wait. */
   terminal?: Map<string, string>;
+  /** Docs whose wait times out WITHOUT rejecting, leaving a terminal `status`
+   *  behind (the verdict landed as the timeout fired). */
+  terminalAfterTimeout?: Map<string, string>;
 }
 
 /** A `DocPush` that behaves like `DocSync` over `server`. */
@@ -76,11 +79,15 @@ function makeConnect(server: FakeServer, behaviour: PushBehaviour = {}) {
       get isSynced() {
         return synced;
       },
+      get status() {
+        return behaviour.terminalAfterTimeout?.get(docId) ?? (synced ? "synced" : "connecting");
+      },
       async whenSynced() {
         await tick();
         const terminal = behaviour.terminal?.get(docId);
         if (terminal) throw new TerminalSyncError(terminal);
         if (behaviour.neverSynced?.has(docId)) return; // times out, isSynced stays false
+        if (behaviour.terminalAfterTimeout?.has(docId)) return; // times out, status terminal
         // SyncStep1/2, both directions — exactly what makes pull-before-seed work.
         Y.applyUpdate(doc, Y.encodeStateAsUpdate(remote, Y.encodeStateVector(doc)), "remote");
         if (!readOnly) {
@@ -733,6 +740,37 @@ describe("ContentUploader — resume and honest failures", () => {
   // one's token mint 404s, the provider turns `deleted`, and the push must fail
   // ONCE, permanently — never a transient failure that re-queues, and never a
   // hit on the streak that would pause the run for every healthy note.
+  // Prod 2026-10-12: four `/sync` sockets every ~10 s, forever. A terminal
+  // status the wait did not reject on must not read as "did not respond".
+  it("records a terminal status left behind by a timed-out wait as PERMANENT", async () => {
+    const r = rig({
+      files: { "Gone.md": "text", "Ok.md": "text", "Slow.md": "text" },
+      notes: [
+        { docId: "gone", relPath: "Gone.md" },
+        { docId: "slow", relPath: "Slow.md" },
+        { docId: "ok", relPath: "Ok.md" },
+      ],
+      behaviour: {
+        terminalAfterTimeout: new Map([["gone", "no-access"]]),
+        neverSynced: new Set(["slow"]),
+      },
+      concurrency: 1,
+      failureStreakLimit: 5,
+    });
+    await r.uploader.run();
+    const failed = r.uploader.failedDocs();
+    expect(failed.find((f) => f.docId === "gone")).toMatchObject({
+      permanent: true,
+      status: "no-access",
+      reason: "you no longer have access to this note",
+    });
+    // A genuine timeout with no terminal verdict stays transient.
+    const slow = failed.find((f) => f.docId === "slow");
+    expect(slow?.permanent).toBeUndefined();
+    expect(slow?.reason).toBe("server did not respond to the initial sync");
+    expect(r.marked).toEqual(["ok"]);
+  });
+
   it("records a doc that turns deleted / no-access as a PERMANENT failure, off the streak", async () => {
     const notes = [
       ...Array.from({ length: 6 }, (_, i) => ({ docId: `gone${i}`, relPath: `Gone${i}.md` })),

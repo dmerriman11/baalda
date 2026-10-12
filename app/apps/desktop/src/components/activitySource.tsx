@@ -20,6 +20,7 @@ import type { HealthFailures } from "../lib/health/model";
 import { syncManager } from "../lib/sync/docSession";
 import { reconcileReport, type ReconcileItem, type ReconcileKind } from "../lib/sync/reconcileReport";
 import * as ipc from "../lib/ipc";
+import { createRefreshScheduler, EVENT_REFRESH_MIN_GAP_MS, sharedInFlight, type RefreshScheduler } from "../lib/activityRefresh";
 import { withoutMissingCopies } from "./recoveryCopies";
 import { buildActivity, failureEntries, staleFailureIds, type ActivityRow, type FailedEntry } from "./activityRows";
 import { ACTIVITY_LOG_MAX_PATHS, appendLog, loadLog, removeFromLog, saveLog, type ActivityLogEntry } from "./activityLog";
@@ -61,33 +62,46 @@ const REFRESH_DEBOUNCE_MS = 250;
  */
 export const REFRESH_INTERVAL_MS = 10 * 60_000;
 /**
- * Minimum gap between two PUSH-driven refetches. A busy team's structural churn
- * arrives as several `registry` frames a second; the feed needs to be seconds
- * fresh, not frame-fresh. Trailing: the last push in a burst is always honoured.
+ * Minimum gap between two EVENT-driven refetches (pushes, reconcile-report
+ * changes, reconnects, focus/visibility). A busy team's structural churn arrives
+ * as several `registry` frames a second; 5 s here still cost one client 36
+ * fetches of each listing per 15 min. Leading and trailing: an idle feed answers
+ * at once and the last event in a burst is always honoured
+ * (`lib/activityRefresh.ts`). Opening the panel skips it.
  */
-export const PUSH_REFRESH_MIN_GAP_MS = 5_000;
+export const PUSH_REFRESH_MIN_GAP_MS = EVENT_REFRESH_MIN_GAP_MS;
 /** "Updating…" appears only for a fetch slower than this. */
 const SLOW_FETCH_MS = 400;
 
-/** One debounced refresh counter: every trigger calls `schedule`, and a burst
- *  of them bumps `nonce` once. */
+/** One debounced refresh counter. `schedule` is an explicit refresh (the panel
+ *  opening): it runs at once. `request` is an event saying the listings may
+ *  have moved: throttled to one per PUSH_REFRESH_MIN_GAP_MS, trailing. Either
+ *  way a burst bumps `nonce` once. */
 function useAutoRefresh() {
   const [nonce, setNonce] = useState(0);
   const timer = useRef<number | null>(null);
-  const schedule = useCallback(() => {
+  const bump = useCallback(() => {
     if (timer.current != null) window.clearTimeout(timer.current);
     timer.current = window.setTimeout(() => {
       timer.current = null;
       setNonce((n) => n + 1);
     }, REFRESH_DEBOUNCE_MS);
   }, []);
+  const scheduler = useRef<RefreshScheduler | null>(null);
+  if (scheduler.current == null) {
+    scheduler.current = createRefreshScheduler({ minGapMs: PUSH_REFRESH_MIN_GAP_MS, run: bump });
+  }
+  const schedule = useCallback(() => scheduler.current?.now(), []);
+  const request = useCallback(() => scheduler.current?.request(), []);
   useEffect(
     () => () => {
+      scheduler.current?.cancel();
       if (timer.current != null) window.clearTimeout(timer.current);
+      timer.current = null;
     },
     [],
   );
-  return { nonce, schedule };
+  return { nonce, schedule, request };
 }
 
 /** True once `busy` has held for SLOW_FETCH_MS; false as soon as it clears. */
@@ -127,7 +141,7 @@ function useTrash(nonce: number) {
     if (!syncEnabled || !vaultId || !onlineRef.current) return;
     let cancelled = false;
     setBusy(true);
-    authManager.api.listTrash(vaultId).then(
+    sharedInFlight(`trash:${vaultId}`, () => authManager.api.listTrash(vaultId)).then(
       (l) => {
         if (cancelled) return;
         lastTrash.set(vaultId, { listing: l, at: Date.now() });
@@ -205,7 +219,7 @@ function useShrinks(nonce: number) {
     let cancelled = false;
     setBusy(true);
     const since = new Date(Date.now() - SHRINK_DAYS * 86_400_000).toISOString();
-    authManager.api.listShrinkEvents(vaultId, since).then(
+    sharedInFlight(`shrinks:${vaultId}`, () => authManager.api.listShrinkEvents(vaultId, since)).then(
       (l) => {
         if (cancelled) return;
         lastShrinks.set(vaultId, l.items);
@@ -255,7 +269,7 @@ function useInvitationExpiries(nonce: number) {
     if (!syncEnabled || !vaultId || !onlineRef.current) return;
     let cancelled = false;
     setBusy(true);
-    authManager.api.listInvitationExpiries(vaultId).then(
+    sharedInFlight(`invitations:${vaultId}`, () => authManager.api.listInvitationExpiries(vaultId)).then(
       (list) => {
         if (cancelled) return;
         lastInvitations.set(vaultId, list);
@@ -307,7 +321,7 @@ function useBrakes(nonce: number) {
     let cancelled = false;
     setBusy(true);
     const since = new Date(Date.now() - SHRINK_DAYS * 86_400_000).toISOString();
-    authManager.api.listShrinkBrakes(vaultId, since).then(
+    sharedInFlight(`brakes:${vaultId}`, () => authManager.api.listShrinkBrakes(vaultId, since)).then(
       (l) => {
         if (cancelled) return;
         lastBrakes.set(vaultId, l);
@@ -463,7 +477,7 @@ function accessLogEntry(e: AccessEvent): ActivityLogEntry {
 
 /** Renders nothing. Mount once, above the panel. */
 export function ActivityHost(): null {
-  const { nonce, schedule } = useAutoRefresh();
+  const { nonce, schedule, request } = useAutoRefresh();
   const root = useStore((s) => s.vault?.path ?? null);
   const [reconcile, setReconcile] = useState<ReconcileItem[]>(() => reconcileReport.items());
   const trash = useTrash(nonce);
@@ -515,9 +529,9 @@ export function ActivityHost(): null {
     () =>
       reconcileReport.subscribe((items) => {
         setReconcile(items);
-        schedule();
+        request();
       }),
-    [schedule],
+    [request],
   );
   useEffect(() => {
     record(
@@ -561,44 +575,32 @@ export function ActivityHost(): null {
 
   // ── Triggers ──
   useEffect(() => {
-    if (vaultSyncStatus === "synced") schedule();
-  }, [vaultSyncStatus, schedule]);
+    // A reconnect is an event, not a user action: a flapping vault channel
+    // must not refetch every listing on each flip.
+    if (vaultSyncStatus === "synced") request();
+  }, [vaultSyncStatus, request]);
   useEffect(() => {
     if (onActivity) schedule();
   }, [onActivity, schedule]);
   useEffect(() => {
     // The server's push (#260). A hidden window skips it: becoming visible
     // refetches anyway (below), so nothing pushed meanwhile is missed.
-    // Window focus rides the same throttle: alt-tabbing back and forth must not
-    // cost a Trash + shrink-events pair each time.
-    let lastPush = 0;
-    let trailing: number | null = null;
-    const throttled = () => {
-      if (document.visibilityState !== "visible" || trailing != null) return;
-      const wait = lastPush + PUSH_REFRESH_MIN_GAP_MS - Date.now();
-      const run = () => {
-        trailing = null;
-        lastPush = Date.now();
-        schedule();
-      };
-      if (wait <= 0) run();
-      else trailing = window.setTimeout(run, wait);
+    // Focus, visibility and the safety-net interval ride the same throttle:
+    // alt-tabbing back and forth must not cost four listings each time.
+    const whenVisible = () => {
+      if (document.visibilityState === "visible") request();
     };
-    syncManager.setActivityChangedListener(throttled);
-    const id = window.setInterval(() => {
-      if (document.visibilityState === "visible") schedule();
-    }, REFRESH_INTERVAL_MS);
-    const onVisible = () => document.visibilityState === "visible" && schedule();
-    document.addEventListener("visibilitychange", onVisible);
-    window.addEventListener("focus", throttled);
+    syncManager.setActivityChangedListener(whenVisible);
+    const id = window.setInterval(whenVisible, REFRESH_INTERVAL_MS);
+    document.addEventListener("visibilitychange", whenVisible);
+    window.addEventListener("focus", whenVisible);
     return () => {
       syncManager.setActivityChangedListener(undefined);
-      if (trailing != null) window.clearTimeout(trailing);
       window.clearInterval(id);
-      document.removeEventListener("visibilitychange", onVisible);
-      window.removeEventListener("focus", throttled);
+      document.removeEventListener("visibilitychange", whenVisible);
+      window.removeEventListener("focus", whenVisible);
     };
-  }, [schedule]);
+  }, [request]);
 
   // ── Rows ──
   const activeFailures = useMemo(() => new Set(failures.map((f) => f.key)), [failures]);

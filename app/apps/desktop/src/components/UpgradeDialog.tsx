@@ -116,7 +116,7 @@ export function UpgradeDialog({
     };
   }, [teamMode, minSeats]);
 
-  const [interval, setInterval] = useState<"month" | "year">(yearly ? "year" : "month");
+  const [interval, setInterval] = useState<"month" | "year">(monthly || !yearly ? "month" : "year");
   const [phase, setPhase] = useState<"plan" | "waiting" | "success" | "timeout">("plan");
   const [busy, setBusy] = useState(false);
   const [checking, setChecking] = useState(false);

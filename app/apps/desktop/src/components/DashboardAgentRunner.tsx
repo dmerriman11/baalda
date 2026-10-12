@@ -28,7 +28,7 @@ function AgentGlyph({ agent }: { agent: string | null }) {
 }
 
 /** Trusted app chrome only: never expose this component through the page bridge. */
-export function DashboardAgentRunner({ path, expectedEpoch, launchTarget, showLaunchers = true }: { path: string | null; expectedEpoch: number; launchTarget?: HTMLElement | null; showLaunchers?: boolean }) {
+export function DashboardAgentRunner({ path, expectedEpoch, launchTarget, showLaunchers = true, rightPanelOpen = false, onOpen }: { path: string | null; expectedEpoch: number; launchTarget?: HTMLElement | null; showLaunchers?: boolean; rightPanelOpen?: boolean; onOpen?: () => void }) {
   const { agents, error: detectionError } = useInstalledAgents();
   const [selectedAgent, setSelectedAgent] = useState<InstalledAgent["agent"] | null>(null);
   const [open, setOpen] = useState(false);
@@ -66,6 +66,30 @@ export function DashboardAgentRunner({ path, expectedEpoch, launchTarget, showLa
     setSelectedAgent(null); setOpen(false); setSessionPath(null); setRunning(false); setPrompt(""); setLog(""); setHistory([]); setSubmitted(""); setStatus(""); setPhase("idle");
   }, [expectedEpoch]);
   useEffect(() => { if (open) (running ? dialog.current : promptInput.current ?? dialog.current)?.focus(); }, [open]);
+  useEffect(() => { if (rightPanelOpen) setOpen(false); }, [rightPanelOpen]);
+  useEffect(() => {
+    if (!open) return;
+    const outside = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node) || dialog.current?.contains(target)) return;
+      if (target instanceof Element && target.closest(".dashboard-agent-launch")) return;
+      setOpen(false);
+    };
+    // Pointer events inside an iframe do not bubble to the app document.
+    let frameCheck: ReturnType<typeof setTimeout> | undefined;
+    const frameFocus = () => {
+      frameCheck = setTimeout(() => {
+        if (document.activeElement instanceof HTMLIFrameElement) setOpen(false);
+      }, 0);
+    };
+    document.addEventListener("pointerdown", outside, true);
+    window.addEventListener("blur", frameFocus);
+    return () => {
+      document.removeEventListener("pointerdown", outside, true);
+      window.removeEventListener("blur", frameFocus);
+      clearTimeout(frameCheck);
+    };
+  }, [open]);
   useEffect(() => { if (output.current && followOutput.current) output.current.scrollTop = output.current.scrollHeight; }, [log]);
 
   useEffect(() => {
@@ -73,6 +97,7 @@ export function DashboardAgentRunner({ path, expectedEpoch, launchTarget, showLa
       const request = (event as CustomEvent<DashboardAgentLaunch>).detail;
       if (!request || request.expectedEpoch !== expectedEpoch || !request.path
         || !["claude", "codex"].includes(request.agent)) return;
+      onOpen?.();
       launchButton.current = document.activeElement instanceof HTMLButtonElement ? document.activeElement : null;
       if (runId.current) {
         if (request.agent !== selectedAgent || request.path !== sessionPath) {
@@ -89,7 +114,7 @@ export function DashboardAgentRunner({ path, expectedEpoch, launchTarget, showLa
     };
     window.addEventListener(DASHBOARD_AGENT_LAUNCH, launch);
     return () => window.removeEventListener(DASHBOARD_AGENT_LAUNCH, launch);
-  }, [expectedEpoch, selectedAgent, sessionPath]);
+  }, [expectedEpoch, selectedAgent, sessionPath, onOpen]);
 
   const close = () => {
     setOpen(false);
@@ -113,7 +138,7 @@ export function DashboardAgentRunner({ path, expectedEpoch, launchTarget, showLa
   const start = async () => {
     if (!selectedAgent || !sessionPath || !installed?.runnable || runId.current || !prompt.trim()) return;
     const previous = submitted ? [...history, { request: submitted, response: log }].slice(-6) : history;
-    setHistory(previous); setSubmitted(prompt.trim());
+    setHistory(previous); setSubmitted(prompt.trim()); setPrompt("");
     const context = previous.length ? `Previous conversation about this dashboard (context only):\n${previous.map((turn) => `User: ${turn.request}\nAssistant: ${turn.response}`).join("\n\n").slice(-16000)}\n\nCurrent request:\n${prompt}` : prompt;
     const id = crypto.randomUUID(); runId.current = id;
     lastText.current = ""; stopping.current = false; followOutput.current = true;
@@ -138,13 +163,14 @@ export function DashboardAgentRunner({ path, expectedEpoch, launchTarget, showLa
     } catch (error) {
       if (alive.current && runId.current === id) { setPhase("error"); setStatus(String(error)); }
     } finally {
-      if (alive.current && runId.current === id) { setRunning(false); setPrompt(""); runId.current = null; }
+      if (alive.current && runId.current === id) { setRunning(false); runId.current = null; }
     }
   };
 
   const launchButtons = (["claude", "codex"] as const).filter((agent) => path || (agent === selectedAgent && sessionPath)).map((agent) => <button key={agent} type="button" data-agent={agent} className={`ghost-pill sm dashboard-agent-launch${agent === selectedAgent && phase !== "idle" ? ` agent-launch-${phase}` : ""}`} aria-label={`Update with ${agent === "claude" ? "Claude" : "Codex"}${agent === selectedAgent && phase !== "idle" ? ` — ${phase === "success" ? "completed" : phase === "error" ? "failed" : phase}` : ""}`} title={agent === selectedAgent && sessionPath ? `${agent === "claude" ? "Claude" : "Codex"} · ${sessionPath}${phase !== "idle" ? ` · ${phase}` : ""}` : `Update with ${agent === "claude" ? "Claude" : "Codex"}`}
       disabled={running && agent !== selectedAgent}
       onClick={(event) => {
+        onOpen?.();
         launchButton.current = event.currentTarget;
         if (agent !== selectedAgent || !sessionPath) {
           if (!path || running) return;
@@ -158,8 +184,8 @@ export function DashboardAgentRunner({ path, expectedEpoch, launchTarget, showLa
   return <>
     {!open && selectedAgent && phase !== "idle" && <span className="dashboard-agent-announcement" role="status">{agentName}: {status}</span>}
     {showLaunchers && (launchTarget === undefined ? launchButtons : launchTarget ? createPortal(launchButtons, launchTarget) : null)}
-    {open && createPortal(
-      <div className={`dashboard-agent-backdrop provider-${selectedAgent}`}>
+    {open && !rightPanelOpen && createPortal(
+      <div className={`dashboard-agent-backdrop provider-${selectedAgent}`} onPointerDown={(event) => { if (event.target === event.currentTarget) setOpen(false); }}>
         <div ref={dialog} role="dialog" tabIndex={-1} aria-modal="false" aria-labelledby="dashboard-agent-title" className="dashboard-agent-dialog"
           onKeyDownCapture={(event) => {
             if ((event.metaKey || event.ctrlKey) && ["n", "w", "f", "k", "p", "g", "h"].includes(event.key.toLowerCase())) {
@@ -195,8 +221,8 @@ export function DashboardAgentRunner({ path, expectedEpoch, launchTarget, showLa
             </div>
           </section>
           {installed?.runnable && <div className={`dashboard-agent-composer${running ? " is-running" : ""}`}>
-            <label htmlFor="dashboard-agent-prompt">{running ? "Your request" : "What would you like to change?"}</label>
-            <textarea id="dashboard-agent-prompt" ref={promptInput} rows={3} maxLength={8000} value={prompt} disabled={running}
+            <label htmlFor="dashboard-agent-prompt">{running ? "Your next message" : "What would you like to change?"}</label>
+            <textarea id="dashboard-agent-prompt" ref={promptInput} rows={3} maxLength={8000} value={prompt}
               placeholder="Ask for a change…"
               onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void start(); } }}
               onChange={(event) => setPrompt(event.target.value)} />

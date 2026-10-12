@@ -1,0 +1,4 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* Only templates whose content lost its top inset when upstream navigation was removed. */
+html:has(meta[name="baalda-template"][content="paper-dashboard"]) .main-panel > .content { padding-top:24px !important; }
+html:has(meta[name="baalda-template"][content="material-dashboard-v3"]) .main-content > .container-fluid.py-2 { padding-top:24px !important; }

@@ -200,7 +200,24 @@ describe("requestReveal", () => {
     expect(second).not.toBe(first);
   });
 
-  it("is fired by every note open, whatever the caller", async () => {
+  it("opens startup Home without revealing its source, then reveals a direct file open", async () => {
+    const path = "Dashboards/Nested/Home.html";
+    useStore.setState({
+      titles: [{ id: "local-" + path, path, title: "Home" }],
+      personalHomeDocId: "local-" + path,
+      revealRequest: { path, edit: false, token: 1 },
+    });
+    await useStore.getState().openHome(false);
+    expect(useStore.getState().openNote?.path).toBe(path);
+    expect(useStore.getState().homeNavigationPath).toBe(path);
+    expect(useStore.getState().revealRequest).toBeNull();
+    expect(useStore.getState().homeActivation).toBeNull();
+    await open(path);
+    expect(useStore.getState().homeNavigationPath).toBeNull();
+    expect(useStore.getState().revealRequest).toMatchObject({ path });
+  });
+
+  it("is fired by ordinary file navigation", async () => {
     await open("Deep/Folder/note.md");
     expect(useStore.getState().revealRequest).toMatchObject({
       path: "Deep/Folder/note.md",

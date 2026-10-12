@@ -64,7 +64,8 @@ it("keeps a hidden run alive across pages, reopens its captured request, and ret
   await act(async () => root.render(createElement(DashboardAgentRunner, { path: "Home.html", expectedEpoch: 1, showLaunchers: true })));
   expect(document.querySelector('[data-agent="claude"]')?.getAttribute("aria-label")).toContain("running");
   await act(async () => document.querySelector<HTMLButtonElement>('[data-agent="claude"]')!.click());
-  expect(document.querySelector("textarea")?.value).toBe("Add hello world");
+  expect(document.querySelector("textarea")?.value).toBe("");
+  expect(document.querySelector(".dashboard-chat-user")?.textContent).toBe("Add hello world");
   expect(document.querySelector(".dashboard-agent-path")?.textContent).toBe("Home.html");
   expect(document.querySelector(".dashboard-agent-output")?.textContent).toContain("Updated the overview.");
   await act(async () => {
@@ -132,7 +133,8 @@ it("attaches to a late header host and preserves an active run when that host is
     await act(async () => root.render(createElement(DashboardAgentRunner, { path: "Home.html", expectedEpoch: 1, launchTarget: replacement })));
     expect(replacement.querySelectorAll(".dashboard-agent-launch")).toHaveLength(2);
     expect(document.querySelector('[role="dialog"]')).toBe(dialog);
-    expect(document.querySelector("textarea")?.value).toBe("Add hello world");
+    expect(document.querySelector("textarea")?.value).toBe("");
+  expect(document.querySelector(".dashboard-chat-user")?.textContent).toBe("Add hello world");
     expect(mocks.cancel).not.toHaveBeenCalled();
     expect(mocks.run).toHaveBeenCalledTimes(1);
     await act(async () => finish());
@@ -156,8 +158,51 @@ it("reopens an active run instead of replacing it from a creation request", asyn
   await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Close agent dialog"]')!.click());
   await act(async () => requestDashboardAgent({ agent: "codex", path: "Created.html", expectedEpoch: 1 }));
   expect(document.querySelector(".dashboard-agent-path")?.textContent).toBe("Home.html");
-  expect(document.querySelector("textarea")?.value).toBe("Add hello world");
+  expect(document.querySelector("textarea")?.value).toBe("");
+  expect(document.querySelector(".dashboard-chat-user")?.textContent).toBe("Add hello world");
   expect(mocks.run).toHaveBeenCalledTimes(1);
   expect(mocks.cancel).not.toHaveBeenCalled();
   await act(async () => finish());
+});
+it("dismisses outside the chat while preserving the draft", async () => {
+  await click("Update with Codex"); await prompt();
+  await act(async () => document.querySelector("textarea")!.dispatchEvent(new Event("pointerdown", { bubbles: true })));
+  expect(document.querySelector(".dashboard-agent-dialog")).not.toBeNull();
+  await act(async () => document.body.dispatchEvent(new Event("pointerdown", { bubbles: true })));
+  expect(document.querySelector(".dashboard-agent-dialog")).toBeNull();
+  await click("Update with Codex");
+  expect(document.querySelector("textarea")!.value).toBe("Add hello world");
+});
+it("closes for Activity and closes Activity before opening chat", async () => {
+  const onOpen = vi.fn();
+  await act(async () => root.render(createElement(DashboardAgentRunner, { path: "Home.html", expectedEpoch: 1, onOpen })));
+  await click("Update with Codex");
+  expect(onOpen).toHaveBeenCalledOnce();
+  await act(async () => root.render(createElement(DashboardAgentRunner, { path: "Home.html", expectedEpoch: 1, onOpen, rightPanelOpen: true })));
+  expect(document.querySelector(".dashboard-agent-dialog")).toBeNull();
+});
+it("dismisses when focus moves into the dashboard iframe", async () => {
+  await click("Update with Codex");
+  const frame = document.createElement("iframe"); document.body.append(frame);
+  await act(async () => {
+    frame.focus(); window.dispatchEvent(new Event("blur"));
+    await new Promise(resolve => setTimeout(resolve, 5));
+  });
+  expect(document.querySelector(".dashboard-agent-dialog")).toBeNull();
+  frame.remove();
+});
+it("clears a sent message and keeps the next draft editable during a run", async () => {
+  let finish!: () => void;
+  mocks.run.mockImplementation(() => new Promise<void>(resolve => { finish = resolve; }));
+  await click("Update with Codex"); await prompt(); await click("Run Codex");
+  expect(document.querySelector("textarea")!.value).toBe("");
+  expect(document.querySelector("textarea")!.disabled).toBe(false);
+  await prompt();
+  await act(async () => finish());
+  expect(document.querySelector("textarea")!.value).toBe("Add hello world");
+});
+it("dismisses through the transparent backdrop around an embedded page", async () => {
+  await click("Update with Codex");
+  await act(async () => document.querySelector(".dashboard-agent-backdrop")!.dispatchEvent(new Event("pointerdown", { bubbles: true })));
+  expect(document.querySelector(".dashboard-agent-dialog")).toBeNull();
 });

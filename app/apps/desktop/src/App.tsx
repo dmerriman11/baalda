@@ -1681,7 +1681,8 @@ export default function App() {
         <main className="main">
           <DashboardAgentRunner key={`${vault.path}:${vault.epoch}`}
             path={homeAgentPath} showLaunchers={homeAgentPath !== null}
-            expectedEpoch={vault.epoch} launchTarget={dashboardHeaderActionsHost} />
+            expectedEpoch={vault.epoch} launchTarget={dashboardHeaderActionsHost}
+            rightPanelOpen={rightPanelOpen} onOpen={useStore.getState().closeRightPanel} />
           <MemberJoinedBanner />
           <WhatsNewModal />
           {/* Sits flush against the top of the window now that there's no system

@@ -39,7 +39,7 @@ import {
   renameInOrder,
 } from "../lib/ordering";
 import { pinModified, sortTree, TREE_SORTS } from "../lib/tree/sort";
-import { homeSidebarVisitKey, pinKey } from "../lib/pins";
+import { isHomeNavigation, pinKey } from "../lib/pins";
 import { requestNewDashboard } from "../lib/homeEvents";
 import { isBlankTreeTarget } from "../lib/tree/blankTarget";
 import { LOCK_TITLES, effectiveLockForPath, lockScopesByPath, type LockScope } from "../lib/locks";
@@ -236,7 +236,7 @@ export function FileTree() {
   const tree = useStore((s) => s.tree);
   const emptyView = useEmptyVaultView();
   const openNote = useStore((s) => s.openNote);
-  const homeHighlighted = useStore((s) => !s.homeSectionHidden && homeSidebarVisitKey(s) !== null);
+  const homeHighlighted = useStore((s) => !s.homeSectionHidden && isHomeNavigation(s));
   const syncEnabled = useStore((s) => s.syncEnabled);
   const syncStatus = useStore((s) => s.syncStatus);
   const locks = useStore((s) => s.locks);

@@ -588,6 +588,7 @@ interface AppStore {
   personalHomeDocId: string | null;
   homePickerOpen: boolean;
   homeLandingPending: boolean;
+  homeNavigationPath: string | null;
   homeActivation: { vaultPath: string; path: string; revision: number; toggleSidebar?: boolean } | null;
   togglePin: (path: string, isDir: boolean, scope?: "personal" | "vault") => Promise<void>;
   setHome: (path: string | null, scope?: "personal" | "vault") => Promise<void>;
@@ -637,7 +638,7 @@ interface AppStore {
   /** Open the root Welcome note if it exists and nothing else is open. */
   openWelcomeIfPresent: () => Promise<void>;
 
-  openNoteByPath: (path: string) => Promise<void>;
+  openNoteByPath: (path: string, source?: "home") => Promise<void>;
   /**
    * Create a note at `dir` with an explicit name, open it, and reveal it in the
    * sidebar. The one path every caller shares — the ⌘N handler used to invent
@@ -2120,6 +2121,7 @@ export const useStore = create<AppStore>((set, get) => ({
   personalHomeDocId: null,
   homePickerOpen: false,
   homeLandingPending: false,
+  homeNavigationPath: null,
   homeActivation: null,
   togglePin: async (path, isDir, scope = "personal") => {
     const vault = get().vault;
@@ -2162,7 +2164,7 @@ export const useStore = create<AppStore>((set, get) => ({
       const vault = get().vault;
       const revision = (get().homeActivation?.revision ?? 0) + 1;
       set({ homePickerOpen: false });
-      await get().openNoteByPath(target.path);
+      await get().openNoteByPath(target.path, "home");
       // Full width is an explicit sidebar Home action, never ordinary navigation.
       // Failed/superseded opens must not change the layout of another note.
       if (fullscreen && vault && get().vault?.path === vault.path && get().vault?.epoch === vault.epoch &&
@@ -2193,7 +2195,7 @@ export const useStore = create<AppStore>((set, get) => ({
       personalPins: readPersonalPins(v?.path),
       personalHomeDocId: readPersonalHome(v?.path),
       homePickerOpen: false,
-      ...(switched ? { homeLandingPending: true, homeActivation: null } : {}),
+      ...(switched ? { homeLandingPending: true, homeActivation: null, homeNavigationPath: null } : {}),
       itemColors: readItemColors(v?.path),
       itemOrder: readItemOrder(v?.path),
       folderSorts: readFolderSorts(v?.path),
@@ -2501,7 +2503,7 @@ export const useStore = create<AppStore>((set, get) => ({
     if (hasWelcome) await get().openNoteByPath(WELCOME_NOTE_PATH);
   },
 
-  openNoteByPath: async (path) => {
+  openNoteByPath: async (path, source) => {
     const epoch = get().vault?.epoch;
     const stillOpening = () => sameVault(get, epoch) && get().openingNotePath === path;
     // A note opened from anywhere takes the editor area back from a virtual tab.
@@ -2511,7 +2513,10 @@ export const useStore = create<AppStore>((set, get) => ({
     // so the row stays unselected and the editor keeps showing the previous note
     // for the whole round trip — a click that visibly does nothing. The sidebar
     // row and the editor both watch this and acknowledge the click at once.
-    set({ openingNotePath: path, homeLandingPending: false, homeActivation: null });
+    set({ openingNotePath: path, homeLandingPending: false, homeActivation: null,
+      homeNavigationPath: source === "home" ? path : null,
+      ...(source === "home" ? { revealRequest: null } : {}),
+    });
     try {
       // The boot paints before sync primes, so this click can land while the
       // registry holds no doc-id map. Opening a MAPPED note then means opening
@@ -2587,11 +2592,8 @@ export const useStore = create<AppStore>((set, get) => ({
         // an existing tab is never moved — the highlight travels, the tabs don't.
         openTabs: s.openTabs.includes(path) ? s.openTabs : [...s.openTabs, path],
       }));
-      // Whichever note becomes active gets shown in the sidebar. Unconditional
-      // on purpose: it is idempotent (`openParents` on open parents and
-      // `scrollTo(…, "auto")` on a visible row both do nothing), and the
-      // alternative is threading a flag through all of this action's callers.
-      get().requestReveal(path);
+      // Home owns its shortcut; do not expand or scroll to the source file.
+      if (source !== "home") get().requestReveal(path);
       // Tell teammates which note we're now viewing (drives their sidebar dots).
       // The announced id must be the SERVER doc_id — see `viewingDocId`. We hand
       // over the PATH rather than a resolved id: opening a note while the
@@ -4561,6 +4563,7 @@ export const useStore = create<AppStore>((set, get) => ({
       personalHomeDocId: readPersonalHome(info.path),
       homePickerOpen: false,
       homeLandingPending: true,
+      homeNavigationPath: null,
       ...vaultScopedSyncReset(),
       openFolderIsSynced: null,
       itemColors: readItemColors(info.path),
@@ -4681,6 +4684,7 @@ export const useStore = create<AppStore>((set, get) => ({
       personalHomeDocId: readPersonalHome(v.path),
       homePickerOpen: false,
       homeLandingPending: true,
+      homeNavigationPath: null,
       ...vaultScopedSyncReset(),
       openFolderIsSynced: true,
       itemColors: readItemColors(v.path),

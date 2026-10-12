@@ -268,11 +268,12 @@ useStore.setState({
   personalHomeDocId: "preview-home",
   personalPins: [{ kind: "note", docId: "preview-home" }, { kind: "folder", path: "Specs" }],
   initAuth: async () => {},
-  openNoteByPath: async (path: string) => {
+  openNoteByPath: async (path: string, source?: "home") => {
     const n = notes.find((n) => n.relPath === path);
     if (!n) return;
     useStore.setState({
       homeActivation: null,
+      homeNavigationPath: source === "home" ? path : null,
       openNote: { path, id: n.id, title: n.title },
       openTabs: [...new Set([...useStore.getState().openTabs, path])],
       activeVirtualTab: null,

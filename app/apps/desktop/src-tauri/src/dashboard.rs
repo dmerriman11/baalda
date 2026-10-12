@@ -163,6 +163,11 @@ fn serve(state: &AppState, request: &Request<Vec<u8>>) -> AppResult<Response<Vec
             }
         }
     }
+    if is_html(rel) {
+        if let Ok(html) = std::str::from_utf8(&body) {
+            body = template_spacing(html).into_bytes();
+        }
+    }
     // A request that was already on disk during a switch must not answer after
     // the switch. Nothing resolves against the global vault outside this guard.
     let inner = state.inner.lock().unwrap();
@@ -173,6 +178,15 @@ fn serve(state: &AppState, request: &Request<Vec<u8>>) -> AppResult<Response<Vec
         require_view_lease(state, token, epoch, rel)?;
     }
     Ok(response(StatusCode::OK, content_type(rel), body))
+}
+
+// Keep existing saved templates comfortable without rewriting the user's file.
+fn template_spacing(html: &str) -> String {
+    if !html.contains("name=\"baalda-template\"") || html.contains("id=\"baalda-template-spacing\"") {
+        return html.to_owned();
+    }
+    let css = include_str!("../../public/dashboard-template-spacing.css");
+    html.replacen("</head>", &format!("<style id=\"baalda-template-spacing\">{css}</style></head>"), 1)
 }
 
 fn response(status: StatusCode, mime: &str, body: Vec<u8>) -> Response<Vec<u8>> {
@@ -592,6 +606,16 @@ pub async fn list_notes_by_property(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_template_spacing_is_scoped_and_idempotent() {
+        let plain = "<html><head></head><body>Custom dashboard</body></html>";
+        assert_eq!(template_spacing(plain), plain);
+        let paper = "<head><meta name=\"baalda-template\" content=\"paper-dashboard\"></head>";
+        let padded = template_spacing(paper);
+        assert!(padded.contains("padding-top:24px"));
+        assert_eq!(template_spacing(&padded), padded);
+    }
 
     #[test]
     fn rejects_private_traversal_unsupported_and_windows_paths() {

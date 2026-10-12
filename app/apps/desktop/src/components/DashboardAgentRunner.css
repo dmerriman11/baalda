@@ -72,8 +72,8 @@
 @media (max-height:620px) { .dashboard-agent-dialog { padding:18px; } .dashboard-agent-heading { padding-bottom:12px; } .dashboard-agent-composer textarea { height:46px; } .dashboard-agent-output-empty { padding:4px 12px; } .dashboard-agent-empty-glyph { width:34px; height:34px; margin-bottom:8px; } }
 
 /* The chat is non-modal: the dashboard remains usable while an agent works. */
-.dashboard-agent-backdrop { inset:52px 0 0 auto; width:min(430px, 100vw); padding:0; background:none; pointer-events:none; display:block; }
-.dashboard-agent-dialog { width:100%; height:100%; max-height:none; border-radius:18px 0 0 0; border-right:0; border-bottom:0; padding:22px 20px 18px; pointer-events:auto; box-shadow:-8px 0 32px rgb(0 0 0 / 9%); animation:dashboard-chat-enter 220ms ease-out; }
+.dashboard-agent-backdrop { inset:52px 0 0; padding:0; background:none; pointer-events:auto; display:flex; align-items:stretch; justify-content:flex-end; }
+.dashboard-agent-dialog { width:min(430px, 100vw); height:100%; max-height:none; border-radius:18px 0 0 0; border-right:0; border-bottom:0; padding:22px 20px 18px; pointer-events:auto; box-shadow:-8px 0 32px rgb(0 0 0 / 9%); animation:dashboard-chat-enter 280ms cubic-bezier(.32,.72,0,1); }
 .provider-claude { --accent:#bd6548; --accent-soft:color-mix(in srgb,#d97757 12%,var(--bg-surface)); --accent-soft-hover:color-mix(in srgb,#d97757 24%,var(--bg-surface)); }
 .provider-codex { --accent:var(--text-primary); --accent-soft:var(--bg-subtle); --accent-soft-hover:var(--border-strong); }
 .provider-codex .dashboard-agent-actions .primary { color:var(--bg-surface); background:var(--text-primary); }
@@ -90,3 +90,5 @@ html[data-theme="dark"] .agent-brand-codex { filter:invert(1); }
 .dashboard-chat-turn { margin-bottom:24px; border-bottom:1px solid var(--border); }
 @keyframes dashboard-chat-enter { from { opacity:0; transform:translateX(24px); } to { opacity:1; transform:translateX(0); } }
 @media(max-width:480px) { .dashboard-agent-dialog { border-radius:0; } }
+/* Keep dashboard launch controls accessible while switching side panels. */
+.main:has(.dashboard-agent-launch) > .right-panel { top:52px; }

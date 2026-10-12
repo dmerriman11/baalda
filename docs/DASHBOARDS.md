@@ -44,6 +44,9 @@ The sidebar's labeled Home section shows that effective Home note above Pinned,
 or offers Set a home when it is unavailable. That action opens the template
 dialog; creating a dashboard and choosing Set as my home remain explicit steps.
 Home navigation lives in the sidebar; there is no duplicate top-bar Home icon.
+Startup and explicit Home navigation highlight only this shortcut, without
+revealing or expanding the source file in Notes. Opening that file directly
+restores ordinary file selection and folder reveal.
 Activating the sidebar Home row explicitly opens Home with the sidebar collapsed.
 Opening the same note through a tab, file tree, keyboard shortcut, or startup
 keeps the sidebar visible. Assigning Home alone does not collapse it. This applies
@@ -303,3 +306,9 @@ extensions are hidden in navigation labels. Website previews show a provider-awa
 loader until the frame loads and place browser actions over the page. Native
 Claude/ChatGPT viewers retain actions in app chrome because native views sit above
 DOM overlays.
+
+Dashboard chat closes on outside clicks, including the embedded page, while keeping
+its draft and any running update. Chat and Activity replace each other. Sending a
+message clears the composer immediately; the next draft stays editable and survives
+completion. Paper and Material templates receive a scoped 24px top inset in both
+new templates and rendered saved copies; rendering does not rewrite vault files.

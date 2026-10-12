@@ -31,8 +31,8 @@ beforeEach(() => {
   useStore.setState({ ...initial, vault, titles: [home], personalHomeDocId: home.id,
     syncEnabled: false, session: null, activeVirtualTab: null, openingNotePath: null,
     homeActivation: null, openNote: null,
-    openNoteByPath: vi.fn(async (path: string) => {
-      useStore.setState({ openNote: { ...home, path }, activeVirtualTab: null });
+    openNoteByPath: vi.fn(async (path: string, source?: "home") => {
+      useStore.setState({ openNote: { ...home, path }, activeVirtualTab: null, homeNavigationPath: source === "home" ? path : null });
     }),
   });
 });
@@ -130,6 +130,11 @@ describe("Home navigation", () => {
     expect(html).toContain('aria-label="Home"');
     expect(html).toContain("Start here");
     expect(html).toContain('aria-current="page"');
+  });
+  it("highlights Home on automatic startup without collapsing the sidebar", async () => {
+    await useStore.getState().openHome(false);
+    expect(renderHome()).toContain('aria-current="page"');
+    expect(useStore.getState().homeActivation).toBeNull();
   });
   it("does not highlight Home when its original file is opened directly", async () => {
     await useStore.getState().openNoteByPath(home.path);

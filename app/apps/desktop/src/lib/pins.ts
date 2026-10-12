@@ -56,6 +56,15 @@ export function effectiveHomeNote(state: {
   const homeId = resolveHome(state.personalHomeDocId, orgId ? state.vaultAppearance[orgId]?.homeDocId : null);
   return state.titles.find((note) => note.id === homeId);
 }
+/** Home navigation highlights the shortcut; direct file navigation highlights the file. */
+export function isHomeNavigation(state: Parameters<typeof effectiveHomeNote>[0] & {
+  homeNavigationPath: string | null;
+  openNote: { path: string } | null;
+  activeVirtualTab: string | null;
+}): boolean {
+  const home = effectiveHomeNote(state);
+  return !!home && !state.activeVirtualTab && state.homeNavigationPath === home.path && state.openNote?.path === home.path;
+}
 /** Only today's effective Home owns the temporary full-width layout. */
 export function homeSidebarVisitKey(state: Parameters<typeof effectiveHomeNote>[0] & {
   vault: { path: string } | null;

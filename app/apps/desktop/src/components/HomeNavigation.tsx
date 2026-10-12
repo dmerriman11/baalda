@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, type CSSProperties } from "react";
 import { useStore } from "../store";
 import { requestNewDashboard as dispatchNewDashboard, type DashboardCreationIntent } from "../lib/homeEvents";
-import { mergePins, visiblePinnedItems, pinKey, effectiveHomeNote, homeSidebarVisitKey } from "../lib/pins";
+import { mergePins, visiblePinnedItems, pinKey, effectiveHomeNote, isHomeNavigation } from "../lib/pins";
 import { displayName } from "../lib/notePath";
 import { nodeAt } from "../lib/tree/lazyTree";
 import { itemColorValue, itemColorFill, automaticTreeColors } from "../lib/appearance";
@@ -36,7 +36,7 @@ export function HomeSection() {
     return () => document.removeEventListener("pointerdown", dismissOutside);
   }, []);
   if (st.homeSectionHidden) return null;
-  const selected = homeSidebarVisitKey(st) !== null;
+  const selected = isHomeNavigation(st);
   const label = home ? displayName(home.path.split("/").pop() ?? home.path, false) : "Set a home";
   return <section className="home-section" aria-label="Home">
     <div className="pinned-label">Home</div>
@@ -110,7 +110,7 @@ export function PinnedSection() {
       const color = st.itemColors[path] ?? automatic[path];
       const lock = st.syncEnabled ? effectiveLockForPath(locks, path) : null;
       const peers = st.vaultPresence.filter((peer) => peer.docId && (item.kind === "note" ? peer.docId === item.docId : st.titles.some((t) => t.id === peer.docId && t.path.startsWith(path + "/"))));
-      return <div key={pinKey(item)} className={`tree-row pinned-row${item.kind === "folder" ? " is-dir" : ""}${st.openNote?.path === path && (st.homeSectionHidden || homeSidebarVisitKey(st) === null) ? " selected" : ""}`}>
+      return <div key={pinKey(item)} className={`tree-row pinned-row${item.kind === "folder" ? " is-dir" : ""}${st.openNote?.path === path && (st.homeSectionHidden || !isHomeNavigation(st)) ? " selected" : ""}`}>
         <button className="pinned-open" title={path} onClick={() => item.kind === "folder"
           ? useStore.setState({ revealRequest: { path, edit: false, token: (st.revealRequest?.token ?? 0) + 1 } })
           : void st.openNoteByPath(path).catch(onError)}>

@@ -11,6 +11,13 @@ vi.mock("../../lib/dashboard/agent", () => ({
   detectInstalledAgents: mocks.detect, runDashboardAgent: mocks.run,
   cancelDashboardAgent: mocks.cancel, appendAgentLog: (old: string, next: string) => old + next,
 }));
+const nativeFocus = vi.hoisted(() => ({ handler: null as null | ((event: { payload: boolean }) => void), stop: vi.fn() }));
+vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({
+  onFocusChanged: vi.fn(async (handler: (event: { payload: boolean }) => void) => {
+    nativeFocus.handler = handler;
+    return nativeFocus.stop;
+  }),
+}) }));
 let root: Root, host: HTMLDivElement;
 beforeEach(async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
@@ -204,5 +211,19 @@ it("clears a sent message and keeps the next draft editable during a run", async
 it("dismisses through the transparent backdrop around an embedded page", async () => {
   await click("Update with Codex");
   await act(async () => document.querySelector(".dashboard-agent-backdrop")!.dispatchEvent(new Event("pointerdown", { bubbles: true })));
+  expect(document.querySelector(".dashboard-agent-dialog")).toBeNull();
+});
+
+it("closes on app focus loss and keeps the draft when reopened", async () => {
+  await click("Update with Codex"); await prompt();
+  await act(async () => nativeFocus.handler?.({ payload: false }));
+  expect(document.querySelector(".dashboard-agent-dialog")).toBeNull();
+  expect(nativeFocus.stop).toHaveBeenCalled();
+  await click("Update with Codex");
+  expect(document.querySelector("textarea")!.value).toBe("Add hello world");
+});
+it("closes on browser window blur even when the composer retains focus", async () => {
+  await click("Update with Codex");
+  await act(async () => window.dispatchEvent(new Event("blur")));
   expect(document.querySelector(".dashboard-agent-dialog")).toBeNull();
 });

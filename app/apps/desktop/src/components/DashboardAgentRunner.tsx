@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   appendAgentLog, cancelDashboardAgent, detectInstalledAgents, runDashboardAgent,
   type InstalledAgent,
@@ -75,19 +76,23 @@ export function DashboardAgentRunner({ path, expectedEpoch, launchTarget, showLa
       if (target instanceof Element && target.closest(".dashboard-agent-launch")) return;
       setOpen(false);
     };
-    // Pointer events inside an iframe do not bubble to the app document.
-    let frameCheck: ReturnType<typeof setTimeout> | undefined;
-    const frameFocus = () => {
-      frameCheck = setTimeout(() => {
-        if (document.activeElement instanceof HTMLIFrameElement) setOpen(false);
-      }, 0);
-    };
+    // Window blur covers other apps as well as focus moving into an iframe.
+    const dismiss = () => setOpen(false);
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    // Native focus events also cover WebViews that retain DOM focus on app blur.
+    void Promise.resolve().then(() => getCurrentWindow().onFocusChanged(({ payload }) => {
+      if (!disposed && !payload) dismiss();
+    })).then((stop) => {
+      if (disposed) stop(); else unlisten = stop;
+    }).catch(() => { /* Browser previews use DOM blur instead. */ });
     document.addEventListener("pointerdown", outside, true);
-    window.addEventListener("blur", frameFocus);
+    window.addEventListener("blur", dismiss);
     return () => {
       document.removeEventListener("pointerdown", outside, true);
-      window.removeEventListener("blur", frameFocus);
-      clearTimeout(frameCheck);
+      window.removeEventListener("blur", dismiss);
+      disposed = true;
+      unlisten?.();
     };
   }, [open]);
   useEffect(() => { if (output.current && followOutput.current) output.current.scrollTop = output.current.scrollHeight; }, [log]);

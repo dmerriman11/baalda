@@ -1,7 +1,12 @@
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../src/http/app.js";
 import { testAppDeps } from "./helpers/app.js";
 import { mintSyncToken, verifySyncToken } from "../src/tokens/sync-token.js";
+import {
+  __clearSyncTokenRefusalLog,
+  logSyncTokenRefusal,
+  SYNC_TOKEN_REFUSAL_LOG_EVERY_MS,
+} from "../src/http/routes/sync-token.js";
 import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
 import { authHeaders, signUp } from "./helpers/auth.js";
@@ -100,6 +105,42 @@ describe("POST /api/sync-token (spec 03 §7)", () => {
 
     const res = await postSyncToken(stranger.token, doc);
     expect(res.status).toBe(403);
+  });
+
+  it("refusals log one throttled [sync-token] line per (user, doc)", async () => {
+    __clearSyncTokenRefusalLog();
+    const stranger = await signUp("stranger2@t.com");
+    const org = await seedOrg("Acme", "acme-t3b");
+    await seedMember(org, stranger.userId, "member");
+    const vault = await seedVault(org);
+    const doc = await seedNote(vault, null, "n.md");
+    const spy = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      for (let i = 0; i < 3; i++) expect((await postSyncToken(stranger.token, doc)).status).toBe(403);
+      expect((await postSyncToken(stranger.token, "no-such-doc")).status).toBe(404);
+      const lines = spy.mock.calls.map((c) => String(c[0])).filter((l) => l.startsWith("[sync-token]"));
+      expect(lines).toEqual([
+        `[sync-token] refused user=${stranger.userId} doc=${doc} status=403 reason=no_access`,
+        `[sync-token] refused user=${stranger.userId} doc=no-such-doc status=404 reason=unknown_doc`,
+      ]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("the refusal log throttle reopens after its window", () => {
+    __clearSyncTokenRefusalLog();
+    const spy = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      const t0 = 1_000_000;
+      expect(logSyncTokenRefusal("u", "d", 403, "no_access", t0)).toBe(true);
+      expect(logSyncTokenRefusal("u", "d", 403, "no_access", t0 + SYNC_TOKEN_REFUSAL_LOG_EVERY_MS - 1)).toBe(false);
+      expect(logSyncTokenRefusal("u", "other", 403, "no_access", t0 + 1)).toBe(true);
+      expect(logSyncTokenRefusal("u", "d", 403, "no_access", t0 + SYNC_TOKEN_REFUSAL_LOG_EVERY_MS)).toBe(true);
+    } finally {
+      spy.mockRestore();
+      __clearSyncTokenRefusalLog();
+    }
   });
 
   it("unknown doc -> 404", async () => {

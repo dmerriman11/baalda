@@ -56,6 +56,35 @@ type NoteBatchItemWithState = NoteBatchItem & { state?: string; textSha256?: str
 type NoteBatchResultWithSeed = NoteBatchResult & Partial<SeedFields>;
 
 /**
+ * Log ONE line per notes/batch request that refused anything, with the
+ * refusal codes counted. Ids and counts only, never paths or text:
+ *
+ *   [notes-batch] vault=<id> user=<id> items=N refused=K refusedBy={"no_write_access":226}
+ *
+ * A refusal is any item answered `error` or `conflict`; an item with no code
+ * (a whole-batch statement failure) counts as `error`.
+ */
+export function logNoteBatchRefusals(
+  vaultId: string,
+  userId: string,
+  results: ReadonlyArray<Pick<NoteBatchResult, "status" | "code"> | undefined>,
+): void {
+  const refusedBy: Record<string, number> = {};
+  let refused = 0;
+  for (const r of results) {
+    if (!r || (r.status !== "error" && r.status !== "conflict")) continue;
+    refused++;
+    const code = r.code ?? "error";
+    refusedBy[code] = (refusedBy[code] ?? 0) + 1;
+  }
+  if (refused === 0) return;
+  console.info(
+    `[notes-batch] vault=${vaultId} user=${userId} items=${results.length} refused=${refused} ` +
+      `refusedBy=${JSON.stringify(refusedBy)}`,
+  );
+}
+
+/**
  * Bulk registration + content push.
  *
  * These four routes exist because the per-item ones cost a network round trip
@@ -498,8 +527,12 @@ export function createBulkRoutes(deps: BulkDeps = {}): Hono {
       for (const r of results) {
         if (r?.code === "no_write_access") Object.assign(r, { code: "account_read_only", error: ACCOUNT_READ_ONLY_MESSAGE });
       }
-      if (results.every((r) => r?.code === "account_read_only")) return c.json(ACCOUNT_READ_ONLY_BODY, 402);
+      if (results.every((r) => r?.code === "account_read_only")) {
+        logNoteBatchRefusals(auth.vaultId, auth.userId, results);
+        return c.json(ACCOUNT_READ_ONLY_BODY, 402);
+      }
     }
+    logNoteBatchRefusals(auth.vaultId, auth.userId, results);
     return c.json({ results });
   });
 

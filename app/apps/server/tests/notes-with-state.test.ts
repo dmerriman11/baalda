@@ -13,6 +13,7 @@ import { setDocBatchRuntime } from "../src/sync/doc-batch.js";
 import { formatDocName } from "../src/sync/doc-name.js";
 import { loadDocState } from "../src/yjs/persistence.js";
 import { config } from "../src/config.js";
+import { resetSyncMetrics, snapshot } from "../src/metrics/sync-metrics.js";
 
 /**
  * One-step note creation (`one-step-note-sync.md` §5.1/§5.2): `notes/batch` and
@@ -245,6 +246,44 @@ describe("notes with state", () => {
     expect(await noteRow(vault, "nope.md")).toBeNull();
     expect(await updateRows(docId)).toBe(0);
     expect(rec.registryBroadcasts).toHaveLength(0);
+  });
+
+  it("refusals log ONE [notes-batch] line with ids and counts only, and count seed.refused.<reason>", async () => {
+    resetSyncMetrics();
+    const reader = await signUp("reader2@seed.test");
+    await seedMember(org, reader.userId, "member");
+    await pool.query("DELETE FROM shares WHERE org_id = $1", [org]);
+    await seedVaultGrant(org, "view");
+    const spy = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      await batch(reader, [
+        { relPath: "secret-a.md", docId: randomUUID(), state: stateFor("a") },
+        { relPath: "secret-b.md", docId: randomUUID(), state: stateFor("b") },
+        { relPath: "Docs/secret-c.md", folderPath: "Other", docId: randomUUID() },
+      ]);
+      const lines = spy.mock.calls.map((c) => String(c[0])).filter((l) => l.startsWith("[notes-batch]"));
+      expect(lines).toEqual([
+        `[notes-batch] vault=${vault} user=${reader.userId} items=3 refused=3 ` +
+          `refusedBy={"no_write_access":2,"path_folder_mismatch":1}`,
+      ]);
+      expect(lines[0]).not.toContain("secret");
+    } finally {
+      spy.mockRestore();
+    }
+    const m = snapshot();
+    expect(m["seed.refused"]).toBe(2);
+    expect(m["seed.refused.no_write_access"]).toBe(2);
+    expect(m["seed.refused.path_folder_mismatch"]).toBeUndefined(); // stateless item
+  });
+
+  it("a batch with no refusals logs no [notes-batch] line", async () => {
+    const spy = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      await batch(owner, [{ relPath: "fine.md", docId: randomUUID(), state: stateFor("fine") }]);
+      expect(spy.mock.calls.some((c) => String(c[0]).startsWith("[notes-batch]"))).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("quota refusal (note_limit_reached) writes nothing", async () => {

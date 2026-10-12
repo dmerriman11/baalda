@@ -235,6 +235,7 @@ function recordSeedOutcomes(
       counts.refused++;
       const code = f.reason ?? "error";
       refusedBy[code] = (refusedBy[code] ?? 0) + 1;
+      inc(`seed.refused.${code}`);
     }
   }
   inc("seed.applied", counts.applied);
@@ -259,5 +260,7 @@ function seededFields(content: "applied" | "covered", sv: Uint8Array): SeedField
 export function unseededFields(reason: string, content: "skipped" | "refused"): SeedFields {
   // `skipped` is an adopt onto a DIFFERENT winner id; `refused` a register-time refusal.
   inc(content === "skipped" ? "seed.adopted" : "seed.refused");
+  // Per-reason breakdown beside the unchanged total (`seed.refused.<reason>`).
+  if (content === "refused") inc(`seed.refused.${reason || "error"}`);
   return { seeded: false, content, reason };
 }

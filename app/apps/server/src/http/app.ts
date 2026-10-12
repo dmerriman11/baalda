@@ -276,6 +276,25 @@ export function createApp(deps: AppDeps): Hono {
   app.get("/.well-known/oauth-protected-resource", (c) =>
     oAuthProtectedResourceMetadata(auth)(c.req.raw),
   );
+  // RFC 9728 §3.1 path-suffixed form for the MCP endpoint: a client that knows
+  // the resource as <origin>/api/mcp asks here first (production saw it 404).
+  // Same metadata, with `resource` naming that exact URL as §3.3 requires.
+  app.get("/.well-known/oauth-protected-resource/api/mcp", async (c) => {
+    const res = await oAuthProtectedResourceMetadata(auth)(c.req.raw);
+    if (!res.ok) return res;
+    const body = (await res.json()) as Record<string, unknown>;
+    const resource = typeof body.resource === "string" ? body.resource : new URL(c.req.url).origin;
+    return new Response(JSON.stringify({ ...body, resource: `${resource.replace(/\/+$/, "")}/api/mcp` }), {
+      status: res.status,
+      headers: res.headers,
+    });
+  });
+  // Clients following the older MCP discovery treat the MCP URL as the issuer
+  // and insert its path (RFC 8414 §3.1). Our issuer is the origin, so this is
+  // the same document as the bare one.
+  app.get("/.well-known/oauth-authorization-server/api/mcp", (c) =>
+    oAuthDiscoveryMetadata(auth)(c.req.raw),
+  );
   // The human-facing login + consent screens of that OAuth flow.
   app.route("/", oauthConnectRoutes);
   // Account pages the emails link to: forgot/reset password, email verified,

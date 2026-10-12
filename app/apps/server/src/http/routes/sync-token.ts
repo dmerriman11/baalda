@@ -15,6 +15,53 @@ import { noteLastSeenForVault } from "../../members/last-seen.js";
  */
 export const syncTokenRoutes = new Hono();
 
+/** At most one refusal line per (user, doc) per this long. */
+export const SYNC_TOKEN_REFUSAL_LOG_EVERY_MS = 5 * 60_000;
+/** Bound on remembered (user, doc) keys; past it, expired keys are swept and,
+ *  if still full, the oldest are dropped (Map keeps insertion order). */
+const REFUSAL_LOG_MAX_KEYS = 10_000;
+const lastRefusalLog = new Map<string, number>();
+
+/**
+ * Log a refused mint as ONE line, throttled per (user, doc) so a client looping
+ * on a doc it cannot open cannot flood the logs. Ids and codes only:
+ *
+ *   [sync-token] refused user=<id> doc=<id> status=403 reason=no_access
+ */
+export function logSyncTokenRefusal(
+  userId: string,
+  docId: string,
+  status: 403 | 404,
+  reason: string,
+  now = Date.now(),
+): boolean {
+  const key = `${userId}\u0000${docId}`;
+  const last = lastRefusalLog.get(key);
+  if (last !== undefined && now - last < SYNC_TOKEN_REFUSAL_LOG_EVERY_MS) return false;
+  lastRefusalLog.delete(key);
+  if (lastRefusalLog.size >= REFUSAL_LOG_MAX_KEYS) {
+    for (const [k, t] of lastRefusalLog) {
+      if (now - t >= SYNC_TOKEN_REFUSAL_LOG_EVERY_MS) lastRefusalLog.delete(k);
+    }
+    while (lastRefusalLog.size >= REFUSAL_LOG_MAX_KEYS) {
+      const oldest = lastRefusalLog.keys().next().value;
+      if (oldest === undefined) break;
+      lastRefusalLog.delete(oldest);
+    }
+  }
+  lastRefusalLog.set(key, now);
+  // `docId` is client-supplied (the 404 path has not matched a row): log it
+  // only when it looks like an id, never raw text or a newline.
+  const doc = /^[A-Za-z0-9_-]{1,128}$/.test(docId) ? docId : "<invalid>";
+  console.info(`[sync-token] refused user=${userId} doc=${doc} status=${status} reason=${reason}`);
+  return true;
+}
+
+/** Tests only: forget the refusal-log throttle. */
+export function __clearSyncTokenRefusalLog(): void {
+  lastRefusalLog.clear();
+}
+
 async function docVaultId(docId: string): Promise<string | null> {
   const { rows } = await pool.query<{ vault_id: string }>(
     `SELECT vault_id FROM notes
@@ -44,7 +91,10 @@ syncTokenRoutes.post("/sync-token", async (c) => {
   }
 
   const vaultId = await docVaultId(docId);
-  if (!vaultId) return c.json({ error: "Unknown document" }, 404);
+  if (!vaultId) {
+    logSyncTokenRefusal(session.userId, docId, 404, "unknown_doc");
+    return c.json({ error: "Unknown document" }, 404);
+  }
 
   // A note in Trash (inside its retention window) still mints: pushes into it
   // are accepted so offline edits reach the server; the note stays deleted.
@@ -54,6 +104,7 @@ syncTokenRoutes.post("/sync-token", async (c) => {
   // read for role, join snapshot and posture. It dies with this request.
   const permission = await syncPermission(session.userId, docId, pool, createResolverCache());
   if (permission === "none") {
+    logSyncTokenRefusal(session.userId, docId, 403, "no_access");
     return c.json({ error: "No access to this document" }, 403);
   }
 

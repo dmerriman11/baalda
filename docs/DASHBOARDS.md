@@ -59,6 +59,13 @@ Home exists, the action instead says Use vault Home instead because clearing
 the personal override reveals the shared Home. Vault owners/admins can also
 Unset vault Home for everyone; members cannot clear the shared setting.
 
+Setting Vault Home automatically makes the chosen file readable to every current
+vault member, without another prompt. Members excluded by file, folder, or vault
+permissions receive a read-only share on that file. Existing view/edit access is
+preserved; the parent folder and other files are not shared. These remain normal
+editable permissions, not a Home-only authorization bypass. Setting Home again
+restores read access for anyone excluded since it was last set.
+
 The sidebar toggle can reveal Home's sidebar after explicit Home navigation.
 Leaving that visit clears its full-width state: returning through a tab or file
 opens normally. Refresh also shows Home's sidebar, independently of the usual

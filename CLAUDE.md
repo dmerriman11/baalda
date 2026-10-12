@@ -978,8 +978,11 @@ on reconnect. An active shared Home follows a changed vault Home; an ordinary op
 file or personal Home does not. Publishing Home waits for the normal note upload
 before applying its default read-only file share. That default uses the existing
 org-wide cap (including managers); owners/admins can change it through normal
-sharing controls. Existing explicit file permissions are preserved. The permission
-and Home pointer commit together, with ordinary ACL and appearance broadcasts.
+sharing controls. Publishing Home also ensures every current member can read
+that file: an excluded member receives a normal per-user read-only file share,
+overriding file/ancestor restrictions only for Home. Existing view/edit access,
+parent-folder permissions and sibling files remain unchanged. The permission and
+Home pointer commit together, with ordinary ACL and appearance broadcasts.
 HTML previews compare file content on watcher notifications, including indexed
 `unchanged` echoes: the preview may still contain the empty pre-sync document even
 when the disk index already has the newly received content. Bridge echo guards

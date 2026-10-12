@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { randomUUID } from "node:crypto";
 import { nextAccessRevision, type AccessChangeDeps } from "../../permissions/access-management.js";
+import { createResolverCache, effectivePermission } from "../../permissions/resolver.js";
 import { Hono } from "hono";
 import { pool } from "../../db/pool.js";
 import { orgRole } from "../../permissions/lookup.js";
@@ -123,8 +124,9 @@ export function createAppearanceRoutes(deps: AccessChangeDeps = {}): Hono {
       await db.query("BEGIN");
       const homeDocId = parsed.settings.homeDocId;
       if (homeDocId) {
-        // Share access and the Home pointer commit together. Use the same ACL
-        // ordering lock as the ordinary sharing controls, preserving custom ACLs.
+        // Share access and the Home pointer commit together under the ordinary
+        // ACL ordering lock. Publishing Home also makes this file readable to
+        // members excluded by file, folder, or vault permissions.
         const revision = await nextAccessRevision(db, orgId);
         const note = await db.query<{ vault_id: string }>(
           `SELECT n.vault_id FROM notes n JOIN vaults v ON v.id = n.vault_id
@@ -146,6 +148,27 @@ export function createAppearanceRoutes(deps: AccessChangeDeps = {}): Hono {
           [randomUUID(), orgId, homeDocId, session.userId, revision],
         );
         if (inserted.rowCount) protectedHome = { vaultId: note.rows[0].vault_id, docId: homeDocId };
+        const members = await db.query<{ user_id: string }>(
+          `SELECT "userId" AS user_id FROM member WHERE "organizationId" = $1`, [orgId],
+        );
+        const cache = createResolverCache();
+        await cache.prefetch(db, [homeDocId]);
+        for (const member of members.rows) {
+          if (await effectivePermission(member.user_id, homeDocId, db, cache) !== "none") continue;
+          // A direct personal readonly share overrides an inherited personal
+          // deny and grants access through a private folder without sharing
+          // that folder or its other files. Existing view/edit access survives.
+          await db.query(
+            `INSERT INTO shares (id, org_id, resource_type, resource_id, principal_type,
+                                 principal_id, permission, created_by, access_revision)
+             VALUES ($1, $2, 'file', $3, 'user', $4, 'readonly', $5, $6)
+             ON CONFLICT (resource_type, resource_id, principal_type, principal_id)
+             DO UPDATE SET permission = EXCLUDED.permission, created_by = EXCLUDED.created_by,
+                           access_revision = EXCLUDED.access_revision`,
+            [randomUUID(), orgId, homeDocId, member.user_id, session.userId, revision],
+          );
+          protectedHome = { vaultId: note.rows[0].vault_id, docId: homeDocId };
+        }
       }
       const { rows } = await db.query<Row>(
         `INSERT INTO vault_appearance (organization_id, settings, updated_by, updated_at)

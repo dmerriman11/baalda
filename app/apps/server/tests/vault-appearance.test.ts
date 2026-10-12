@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "../src/http/app.js";
 import { recordingAppDeps } from "./helpers/app.js";
-import { effectivePermission } from "../src/permissions/resolver.js";
+import { createResolverCache, effectivePermission } from "../src/permissions/resolver.js";
 import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
 import { authHeaders, createOrg, signUp, type TestUser } from "./helpers/auth.js";
@@ -191,6 +191,70 @@ describe("vault appearance", () => {
     expect((await patch()).status).toBe(200);
     expect((await pool.query("SELECT permission FROM shares WHERE resource_id = $1", [home])).rows)
       .toEqual([{ permission: "edit" }]);
+  });
+
+  it.each([
+    ["file", "user"], ["folder", "user"], ["vault", "user"],
+    ["file", "org"], ["folder", "org"],
+  ] as const)("automatically shares only Home through a %s/%s restriction", async (resourceType, principalType) => {
+    const { owner, admin, member, orgId, vaultId } = await setup();
+    await seedVaultGrant(orgId, "edit");
+    const folder = await seedFolder(vaultId, null, "Dashboards", "Dashboards");
+    const home = await seedNote(vaultId, folder, "Dashboards/Home.html", owner.userId);
+    const sibling = await seedNote(vaultId, folder, "Dashboards/Private.html", owner.userId);
+    const resourceId = resourceType === "file" ? home : resourceType === "folder" ? folder : orgId;
+    await pool.query(
+      `INSERT INTO shares (id, org_id, resource_type, resource_id, principal_type, principal_id, permission)
+       VALUES ('restriction', $1, $2, $3, $4, $5, 'denied')`,
+      [orgId, resourceType, resourceId, principalType, principalType === "org" ? orgId : member.userId],
+    );
+    expect(await effectivePermission(member.userId, home)).toBe("none");
+    const siblingBefore = await effectivePermission(member.userId, sibling);
+    const outsider = await signUp("outsider@appearance.test");
+    const response = await put(admin, orgId, { homeDocId: home });
+    expect(response.status).toBe(200);
+    expect(await effectivePermission(member.userId, home)).toBe("view");
+    const cache = createResolverCache();
+    await cache.prefetch(pool, [home, sibling]);
+    expect(await effectivePermission(member.userId, home, pool, cache)).toBe("view");
+    expect(await effectivePermission(member.userId, sibling, pool, cache)).toBe(siblingBefore);
+    expect(await effectivePermission(outsider.userId, home)).toBe("none");
+    expect((await pool.query(
+      "SELECT permission FROM shares WHERE resource_type = 'file' AND resource_id = $1 AND principal_type = 'user' AND principal_id = $2",
+      [home, member.userId],
+    )).rows).toEqual([{ permission: "readonly" }]);
+    // Only an explicit deny on this very file is replaced; inherited rules stay.
+    if (resourceType !== "file" || principalType !== "user") {
+      expect((await pool.query("SELECT permission FROM shares WHERE id = 'restriction'")).rows).toEqual([{ permission: "denied" }]);
+    }
+    expect(rec.aclBroadcasts).toContain(vaultId);
+    expect(published.at(-1)?.change.settings.homeDocId).toBe(home);
+    // Repeating the action is idempotent, and ordinary access management can
+    // still restrict the file afterwards; publishing it again restores sharing.
+    expect((await put(owner, orgId, { homeDocId: home })).status).toBe(200);
+    expect((await pool.query(
+      "SELECT count(*)::int AS count FROM shares WHERE resource_id = $1 AND principal_type = 'user' AND principal_id = $2", [home, member.userId],
+    )).rows[0].count).toBe(1);
+    await pool.query("UPDATE shares SET permission = 'denied' WHERE resource_type = 'file' AND resource_id = $1 AND principal_type = 'user' AND principal_id = $2", [home, member.userId]);
+    expect(await effectivePermission(member.userId, home)).toBe("none");
+    expect((await put(owner, orgId, { homeDocId: home })).status).toBe(200);
+    expect(await effectivePermission(member.userId, home)).toBe("view");
+  });
+
+  it("keeps existing editors while giving an excluded member read-only Home access", async () => {
+    const { owner, admin, member, orgId, vaultId } = await setup();
+    await seedVaultGrant(orgId, "edit");
+    const home = await seedNote(vaultId, null, "Home.html", owner.userId);
+    await pool.query(
+      `INSERT INTO shares (id, org_id, resource_type, resource_id, principal_type, principal_id, permission)
+       VALUES ('excluded', $1, 'file', $2, 'user', $3, 'denied')`, [orgId, home, member.userId],
+    );
+    expect((await put(owner, orgId, { homeDocId: home })).status).toBe(200);
+    expect(await effectivePermission(owner.userId, home)).toBe("edit");
+    expect(await effectivePermission(admin.userId, home)).toBe("edit");
+    expect(await effectivePermission(member.userId, home)).toBe("view");
+    const rows = await pool.query("SELECT principal_id FROM shares WHERE resource_id = $1", [home]);
+    expect(rows.rows).toEqual([{ principal_id: member.userId }]);
   });
 
   it("rejects a Home reference outside the vault without publishing or changing access", async () => {

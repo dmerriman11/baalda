@@ -1,4 +1,7 @@
 /* SPDX-License-Identifier: Apache-2.0 */
-/* Only templates whose content lost its top inset when upstream navigation was removed. */
+/* Restore insets lost when upstream navigation was removed. */
 html:has(meta[name="baalda-template"][content="paper-dashboard"]) .main-panel > .content { padding-top:24px !important; }
 html:has(meta[name="baalda-template"][content="material-dashboard-v3"]) .main-content > .container-fluid.py-2 { padding-top:24px !important; }
+html:has(meta[name="baalda-template"][content="argon-dashboard"]) .main-content > .container-fluid.py-4,
+html:has(meta[name="baalda-template"][content="soft-ui-dashboard"]) .main-content > .container-fluid.py-4,
+html:has(meta[name="baalda-template"][content="material-dashboard-v3"]) .main-content > .container-fluid.py-2 { padding-inline:clamp(16px, 2vw, 24px) !important; }

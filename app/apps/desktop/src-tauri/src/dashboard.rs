@@ -182,11 +182,18 @@ fn serve(state: &AppState, request: &Request<Vec<u8>>) -> AppResult<Response<Vec
 
 // Keep existing saved templates comfortable without rewriting the user's file.
 fn template_spacing(html: &str) -> String {
-    if !html.contains("name=\"baalda-template\"") || html.contains("id=\"baalda-template-spacing\"") {
+    if !html.contains("name=\"baalda-template\"") {
         return html.to_owned();
     }
     let css = include_str!("../../public/dashboard-template-spacing.css");
-    html.replacen("</head>", &format!("<style id=\"baalda-template-spacing\">{css}</style></head>"), 1)
+    let style = format!("<style id=\"baalda-template-spacing\">{css}</style>");
+    if let Some(start) = html.find("<style id=\"baalda-template-spacing\">") {
+        if let Some(end) = html[start..].find("</style>") {
+            return format!("{}{}{}", &html[..start], style, &html[start + end + 8..]);
+        }
+        return html.to_owned();
+    }
+    html.replacen("</head>", &format!("{style}</head>"), 1)
 }
 
 fn response(status: StatusCode, mime: &str, body: Vec<u8>) -> Response<Vec<u8>> {
@@ -615,6 +622,11 @@ mod tests {
         let padded = template_spacing(paper);
         assert!(padded.contains("padding-top:24px"));
         assert_eq!(template_spacing(&padded), padded);
+        let older = paper.replace("</head>", "<style id=\"baalda-template-spacing\">old spacing</style></head>");
+        let refreshed = template_spacing(&older);
+        assert!(!refreshed.contains("old spacing"));
+        assert!(refreshed.contains("padding-inline:clamp(16px, 2vw, 24px)"));
+        assert_eq!(refreshed.matches("id=\"baalda-template-spacing\"").count(), 1);
     }
 
     #[test]

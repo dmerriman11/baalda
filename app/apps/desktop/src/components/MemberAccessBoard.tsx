@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { BulkAccessResource, MemberOverview, TeamAccessMode } from "../lib/api";
+import { sharePrincipalType, shareResourceId, shareResourceType, type BulkAccessResource, type MemberOverview, type TeamAccessMode } from "../lib/api";
 import { authManager } from "../lib/auth/authManager";
 import {
   BOARD_COLUMNS,
@@ -35,7 +35,7 @@ import { buildOrgRowsByPath } from "../lib/accessMode";
 import { itemLockRows, resourceIdsByPath } from "../lib/locks";
 import { useStore } from "../store";
 
-const LOCKED_TITLE = "Locked for everyone — unlock it from the sidebar to allow editing";
+const LOCKED_TITLE = "Read-only for everyone — moving to Can edit will ask to unlock";
 
 /** One batcher for the board: a render's reads go out as one request. */
 const summaries = createAccessSummaryBatcher({
@@ -391,13 +391,32 @@ export function MemberAccessBoard({
     if (!canSetAccess || busy) return;
     const fromOwn = own.get(row.key);
     if (!fromOwn || fromOwn === to) return;
-    if (to === "open" && teamLocked.has(row.key)) {
-      toast(`${row.name} is locked for everyone. Unlock it from the sidebar first.`, "neutral");
-      return;
-    }
-    animateMove(row, fromOwn);
-    void (async () => {
-      if (!(await write([row], to, row.key))) return;
+    // A folder move includes its contents. Check their Everyone caps too,
+    // including ancestor locks, before claiming a per-person write can lift them.
+    const paths = new Map(allRows.map((r) => [`${accessResourceType(r.kind)}:${r.id}`, r.path]));
+    const blockers = to === "open" ? itemLockRows(storeLocks).filter((lock) => {
+      if (sharePrincipalType(lock) !== "org" || !["locked", "readonly"].includes(lock.permission)) return false;
+      const path = paths.get(`${shareResourceType(lock)}:${shareResourceId(lock)}`);
+      return path !== undefined && (path === row.path || row.path.startsWith(path + "/") ||
+        (row.kind === "folder" && path.startsWith(row.path + "/")));
+    }) : [];
+    const run = async () => {
+      if (blockers.length) {
+        setBusy(true);
+        try {
+          for (const lock of blockers) await useStore.getState().removeLock(lock.id);
+        } catch (cause) {
+          toast(accessWriteFailureMessage(cause), "error");
+          rereadOrReload(allRows);
+          return;
+        } finally { if (live.current) setBusy(false); }
+        if (!live.current) return;
+      }
+      animateMove(row, fromOwn);
+      const written = await write([row], to, row.key);
+      // An ancestor unlock can also change siblings outside the moved subtree.
+      if (blockers.length) rereadOrReload(allRows.filter((r) => r.key !== row.key));
+      if (!written) return;
       // Say it worked only once the server agrees: re-read this row directly
       // (not through readModes, whose in-flight dedupe could hand back an
       // answer from before the write) and let the board show the truth.
@@ -412,7 +431,16 @@ export function MemberAccessBoard({
       setSummaryModes((prev) => new Map(prev).set(row.key, actual));
       if (actual === to) toast(moveMessage(who, isSelf, row.name, to));
       else toast(notAppliedMessage(row.name, actual), "error");
-    })();
+    };
+    if (blockers.length) {
+      setConfirm({
+        title: "Remove read-only rules for everyone?",
+        button: "Unlock and allow editing",
+        outcome: `${row.name} is affected by ${blockers.length === 1 ? "a read-only rule" : `${blockers.length} read-only rules`} for everyone. Removing ${blockers.length === 1 ? "it" : "them"} lets each person's other permissions apply, including on any locked parent folder's contents. Then ${isSelf ? "you" : who} can edit ${row.name}.`,
+        danger: false,
+        apply: run,
+      });
+    } else void run();
   };
 
   const setEverything = (choice: EverythingChoice) => {
@@ -767,7 +795,7 @@ export function MemberAccessBoard({
                       <BoardRowItem
                         key={r.row.key}
                         item={r}
-                        canLeft={i > 0 && !(teamLocked.has(r.row.key) && neighbourMode(col.mode, -1) === "open")}
+                        canLeft={i > 0}
                         teamLocked={teamLocked.has(r.row.key)}
                         canRight={i < BOARD_COLUMNS.length - 1}
                         disabled={locked}

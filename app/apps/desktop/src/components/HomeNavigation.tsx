@@ -12,6 +12,7 @@ import { sortTree } from "../lib/tree/sort";
 import { effectiveLockForPath, lockScopesByPath, LOCK_TITLES } from "../lib/locks";
 import { iconForPath, SidebarPresence } from "./FileTree";
 import { toast } from "../lib/toast";
+import { MenuSelect } from "./MenuSelect";
 import "./HomeNavigation.css";
 
 export function requestNewDashboard(kind?: "link", intent?: DashboardCreationIntent) {
@@ -76,6 +77,7 @@ export function PinnedSection() {
   const st = useStore();
   const orgId = st.syncEnabled ? st.session?.activeOrganizationId : null;
   const shared = orgId ? st.vaultAppearance[orgId]?.pinnedItems ?? [] : [];
+  const canManage = !!orgId && st.members.some((member) => member.userId === st.session?.user.id && (member.role === "owner" || member.role === "admin"));
   const pins = mergePins(shared, st.personalPins);
   const pinSignature = JSON.stringify(pins);
   useEffect(() => {
@@ -122,7 +124,15 @@ export function PinnedSection() {
           {lock && <span className="pinned-lock" title={LOCK_TITLES[lock]} aria-label={LOCK_TITLES[lock]}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><rect x="5" y="10" width="14" height="11" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></svg></span>}
           {shared && <span className="pinned-shared" title="Pinned for everyone by a vault admin">Everyone</span>}
         </button>
-        {!shared && <button className="pinned-remove" aria-label={`Unpin ${path}`} title="Unpin" onClick={() => void st.togglePin(path, item.kind === "folder").catch(onError)}>×</button>}
+        {(!shared || canManage) && <MenuSelect<"none" | "unpin">
+          value="none"
+          options={[{ value: "unpin", label: shared ? "Unpin for everyone" : "Unpin" }]}
+          ariaLabel={`Pinned options for ${displayName(path.split("/").pop() ?? path, item.kind === "folder")}`}
+          triggerClassName="row-more-btn pinned-more"
+          triggerContent="···"
+          caret={false}
+          onSelect={() => void st.togglePin(path, item.kind === "folder", shared ? "vault" : "personal").catch(onError)}
+        />}
       </div>;
     })}
   </section>;

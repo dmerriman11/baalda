@@ -11,7 +11,7 @@ vi.mock("../components/FileTree", () => ({ iconForPath: () => null, SidebarPrese
 import { useStore } from "../store";
 import { authManager } from "../lib/auth/authManager";
 import { syncManager } from "../lib/sync/docSession";
-import { HomeSection } from "../components/HomeNavigation";
+import { HomeSection, PinnedSection } from "../components/HomeNavigation";
 import { readHomeSectionHidden } from "../lib/prefs";
 
 const vault = { path: "/vault", name: "Vault", epoch: 1 };
@@ -242,4 +242,48 @@ it("pins a new note using its canonical server identity", async () => {
   vi.mocked(authManager.api.toggleVaultPin).mockResolvedValue({ settings: { pinnedItems: [{ kind: "note", docId: "canonical-note" }] }, updatedAt: null, updatedBy: null });
   await useStore.getState().togglePin(home.path, false, "vault");
   expect(authManager.api.toggleVaultPin).toHaveBeenCalledWith("org", { kind: "note", docId: "canonical-note" });
+});
+
+
+describe("Pinned options", () => {
+  it.each(["owner", "admin", "member"])("offers shared Unpin only to managers (%s)", async (role) => {
+    const togglePin = vi.fn(async () => {});
+    useStore.setState({ syncEnabled: true,
+      session: { user: { id: "me" }, activeOrganizationId: "org" } as never,
+      members: [{ id: "membership", userId: "me", organizationId: "org", role }],
+      vaultAppearance: { org: { pinnedItems: [{ kind: "note", docId: home.id }] } },
+      personalPins: [], togglePin, automaticItemColors: false,
+    });
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    try {
+      act(() => root.render(createElement(PinnedSection)));
+      const options = host.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]');
+      if (role === "member") { expect(options).toBeNull(); return; }
+      await act(async () => options!.click());
+      const action = document.querySelector<HTMLElement>('[role="menuitemradio"]')!;
+      expect(action.textContent).toContain("Unpin for everyone");
+      await act(async () => action.click());
+      expect(togglePin).toHaveBeenCalledWith(home.path, false, "vault");
+      expect(useStore.getState().openNoteByPath).not.toHaveBeenCalled();
+    } finally { act(() => root.unmount()); host.remove(); }
+  });
+
+  it("unpins personal notes through their options without opening the file", async () => {
+    const togglePin = vi.fn(async () => {});
+    useStore.setState({ personalPins: [{ kind: "note", docId: home.id }], togglePin, automaticItemColors: false });
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    try {
+      act(() => root.render(createElement(PinnedSection)));
+      await act(async () => host.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]')!.click());
+      const action = document.querySelector<HTMLElement>('[role="menuitemradio"]')!;
+      expect(action.textContent).toContain("Unpin");
+      await act(async () => action.click());
+      expect(togglePin).toHaveBeenCalledWith(home.path, false, "personal");
+      expect(useStore.getState().openNoteByPath).not.toHaveBeenCalled();
+    } finally { act(() => root.unmount()); host.remove(); }
+  });
 });

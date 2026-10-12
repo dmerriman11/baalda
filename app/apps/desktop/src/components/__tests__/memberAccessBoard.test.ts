@@ -211,15 +211,15 @@ describe("Member access board", () => {
     expect(drawn("readonly")).toEqual(["Specs", "Zeta", "API", "Welcome"]);
   });
 
-  it("a row locked for everyone shows a lock, cannot go to Can edit, and says why", async () => {
+  it("asks before unlocking an Everyone rule when moving a note to Can edit", async () => {
     patchStore({
       locks: [{ id: "l1", resourceType: "file", resourceId: "n2", principalType: "org", principalId: "org-1", permission: "locked" }],
     });
     await render();
     const welcome = row("readonly", "Welcome");
     expect(welcome.querySelector(".access-board-lock")?.getAttribute("title"))
-      .toBe("Locked for everyone — unlock it from the sidebar to allow editing");
-    expect(button("Move Welcome left").disabled).toBe(true);
+      .toBe("Read-only for everyone — moving to Can edit will ask to unlock");
+    expect(button("Move Welcome left").disabled).toBe(false);
     expect(button("Move Welcome right").disabled).toBe(false);
     const original = document.elementFromPoint;
     document.elementFromPoint = () => column("open");
@@ -232,9 +232,43 @@ describe("Member access board", () => {
     }
     await settle();
     expect(api.setBulkAccess).not.toHaveBeenCalled();
-    expect(toast).toHaveBeenCalledWith("Welcome is locked for everyone. Unlock it from the sidebar first.", "neutral");
+    expect(dialog()?.textContent).toContain("Remove read-only rules for everyone?");
+    const removeLock = vi.fn().mockResolvedValue(undefined);
+    patchStore({ removeLock });
+    await act(async () => dialogButton("Unlock and allow editing").click());
+    await settle();
+    expect(removeLock).toHaveBeenCalledWith("l1");
+    expect(api.setBulkAccess).toHaveBeenCalledWith("org-1", expect.objectContaining({ mode: "open" }), expect.anything());
     expect(toast).not.toHaveBeenCalledWith(expect.anything(), "error");
-    expect(names("readonly")).toContain("Welcome");
+    expect(names("open")).toContain("Welcome");
+  });
+
+  it("checks locked descendants before moving a folder and leaves rules unchanged on cancel", async () => {
+    modes.f1 = "readonly";
+    modes.n1 = "readonly";
+    const removeLock = vi.fn().mockResolvedValue(undefined);
+    patchStore({ removeLock, locks: [{ id: "child-lock", resourceType: "file", resourceId: "n1", principalType: "org", principalId: "org-1", permission: "readonly" }] });
+    await render();
+    await act(async () => button("Move Specs left").click());
+    expect(dialog()?.textContent).toContain("Remove read-only rules for everyone?");
+    expect(api.setBulkAccess).not.toHaveBeenCalled();
+    await act(async () => dialogButton("Cancel").click());
+    expect(removeLock).not.toHaveBeenCalled();
+    expect(api.setBulkAccess).not.toHaveBeenCalled();
+    expect(names("readonly")).toContain("Specs");
+  });
+
+  it("does not claim a move succeeded when removing an Everyone rule fails", async () => {
+    modes.f1 = "readonly";
+    modes.n1 = "readonly";
+    const removeLock = vi.fn().mockRejectedValue(new Error("offline"));
+    patchStore({ removeLock, locks: [{ id: "child-lock", resourceType: "file", resourceId: "n1", principalType: "org", principalId: "org-1", permission: "readonly" }] });
+    await render();
+    await act(async () => button("Move Specs left").click());
+    await act(async () => dialogButton("Unlock and allow editing").click());
+    await settle();
+    expect(api.setBulkAccess).not.toHaveBeenCalled();
+    expect(toast).toHaveBeenCalledWith("Couldn't update access, check your connection", "error");
   });
 
   it("only a move to No access confirms: Set everything to → Can view and Add all apply at once", async () => {

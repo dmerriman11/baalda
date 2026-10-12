@@ -316,7 +316,10 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   merged by max, persisted as `config.json ackedSv` — and
   `registry.unseenWorkVerdict` answers `none` (stale device: accept outright), `unseen` (local ops or a
   file hash ≠ `diskBase` the server never saw: recovery copy under `.context/trash` FIRST, then apply)
-  or `unknown` (unprovable: the old "left on disk" refusal). A same-path create from two devices stays
+  or `unknown` (no content baseline). For an explicit deletion, a matching local index `doc_id`
+  and path establish identity even without a per-document reconciliation baseline: preserve a
+  recovery copy first, then remove the active file. An unprovable identity still stays on disk;
+  a tombstone must never remove an unrelated file reusing its path. A same-path create from two devices stays
   two notes: the later one by `created_at` is renamed `<stem> (conflict YYYY-MM-DD).<ext>`
   (`conflictPath`) and registered as its own note — never adopted onto the other's id. A rename made
   while the app was closed is paired back by content hash at startup (`pairClosedAppRenames`) so the

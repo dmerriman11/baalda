@@ -613,21 +613,15 @@ export function planInbound(input: InboundInput): InboundPlan {
 
     // Gone from the server's listing.
     if (prev === undefined) {
-      // Never agreed it was ours, so it is not ours to REMOVE — but a tombstone
-      // on the very id this file carries is proof it is the deleted note, so it
-      // must not be re-registered either. Suppress only; the file stays on disk
-      // as a local-only copy (its content may exist nowhere else), and the
-      // refusal is reported so the user can see why it no longer syncs.
+      // An explicit tombstone matched to this local document is authoritative
+      // even before its first full reconciliation recorded a baseline (eager
+      // registration). The executor preserves unconfirmed content before
+      // removal and refuses an unprovable identity; absence alone does nothing.
       if (dead && loc !== undefined) {
         plan.suppress.add(loc);
-        plan.rejected.push({
-          kind: "trash",
-          path: loc,
-          docId,
-          reason: "deleted on the server by another member — kept on this device, no longer synced",
-        });
+        pushTrash(plan, docId, loc, "deleted");
       }
-      continue; // never agreed it was ours — not ours to touch
+      continue; // Without a matching tombstone, no baseline means no removal.
     }
 
     if (dead) {

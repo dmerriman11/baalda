@@ -1892,9 +1892,9 @@ export class VaultRegistry {
    *  - `none`    — stale device: accept the delete / revocation outright;
    *  - `unseen`  — this doc holds work the server never acknowledged;
    *  - `unknown` — a non-empty file at the doc's path with no local CRDT and NO
-   *    disk base for the doc: nothing proves the file IS that note (a
-   *    re-import under a fresh local id lands exactly here), so it must not be
-   *    removed at all, copy or not.
+   *    disk base for the doc. A confirmed deletion can still proceed after
+   *    index identity verification and a recovery copy. Otherwise leave it
+   *    untouched: a re-import under a fresh local id also lands here.
    */
   async unseenWorkVerdict(
     docId: string,
@@ -2621,9 +2621,20 @@ export class VaultRegistry {
           // bridge still answers for ops not yet in SQLite.
           // A note this device deleted in-app moments ago is the user's own
           // decision: no recovery copy, no report, whatever it held unpushed.
-          const verdict = gone.reason !== "revoked" && this.isOwnDelete(gone.path)
+          let verdict = gone.reason !== "revoked" && this.isOwnDelete(gone.path)
             ? "none"
             : await this.unseenWorkVerdict(gone.docId, gone.path);
+          if (verdict === "unknown" && gone.reason === "deleted") {
+            // No content baseline is not the same as no identity. Newly created
+            // or never-opened files can lack CRDT/disk-base state, while the
+            // index still proves this is exactly the tombstoned document.
+            // Preserve its bytes before accepting the team's deletion. A fresh
+            // local ID at the same path is NOT proof and stays protected.
+            const indexed = await args.titles();
+            if (indexed.some((note) => note.id === gone.docId && samePath(note.path, gone.path))) {
+              verdict = "unseen";
+            }
+          }
           if (verdict === "unknown") {
             // Unprovable identity: the old "left on disk" refusal, unchanged.
             this.recordFailure({

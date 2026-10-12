@@ -689,6 +689,30 @@ describe("inbound delete", () => {
     expect(ipc.trashNote).not.toHaveBeenCalled();
   });
 
+  it.each(["Untitled.md", "Dashboards/Home.html"])("accepts an admin delete of a newly registered owner file: %s", async (path) => {
+    const disk = new FakeDisk();
+    install(disk);
+    const state: ServerState = { notes: [] };
+    const api = fakeApi(state);
+    const reg = new VaultRegistry(api);
+    const host = recordingHost();
+    reg.setInboundHost(host.host);
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    // Eager registration happens after the last full reconcile, so this new
+    // file is mapped but has no per-document baseline yet.
+    disk.notes.set(path, "owner-new");
+    disk.bodies.set(path, "owner content");
+    await reg.registerNote(path, "New", "owner-new");
+    state.notes = [];
+    state.tombstones = ["owner-new"];
+    vi.mocked(api.createNote).mockClear();
+    await reg.pull();
+    expect(disk.notes.has(path)).toBe(false);
+    expect(host.removed).toEqual([expect.objectContaining({ path, reason: "deleted" })]);
+    await reg.pull();
+    expect(api.createNote).not.toHaveBeenCalled();
+  });
+
   it("copies a note with unseen work to the trash before a teammate's delete removes it (D1)", async () => {
     // Delete wins for the team; this device's unsent version stays recoverable.
     reconcileReport.clear();
@@ -728,8 +752,8 @@ describe("inbound delete", () => {
     expect(reconcileReport.items()).toEqual([]);
   });
 
-  it("leaves a non-empty file alone when nothing proves it is the deleted note", async () => {
-    // No local CRDT and no disk base for the doc: its identity is unprovable.
+  it("preserves a matching deleted document in Trash when its content baseline is missing", async () => {
+    // The index proves identity even though content acknowledgement is absent.
     const disk = new FakeDisk();
     disk.notes.set("mine.md", "d1");
     disk.bodies.set("mine.md", "words nobody else has");
@@ -739,9 +763,46 @@ describe("inbound delete", () => {
       then: { notes: [], tombstones: ["d1"] },
       patch: () => vi.mocked(ipc.getDiskBase).mockResolvedValue(null as never),
     });
+    expect(disk.notes.has("mine.md")).toBe(false);
+    expect(disk.copies.map((copy) => copy.from)).toEqual(["mine.md"]);
+    expect(r.reg.failures().map((f) => f.kind)).not.toContain("orphan");
+  });
+
+  it("does not remove a different local identity merely reusing a deleted path", async () => {
+    const disk = new FakeDisk();
+    disk.notes.set("mine.md", "d1");
+    disk.bodies.set("mine.md", "new independent content");
+    const r = await twoPasses({
+      disk,
+      first: { notes: [{ id: "d1", rel_path: "mine.md" }] },
+      then: { notes: [], tombstones: ["d1"] },
+      patch: () => {
+        vi.mocked(ipc.getDiskBase).mockResolvedValue(null as never);
+        vi.mocked(ipc.listNoteTitles).mockResolvedValue([
+          { id: "different-local-id", path: "mine.md", title: "mine" },
+        ] as never);
+      },
+    });
     expect(disk.notes.has("mine.md")).toBe(true);
     expect(disk.copies).toEqual([]);
     expect(r.reg.failures().map((f) => f.kind)).toContain("orphan");
+  });
+
+  it("keeps unconfirmed deleted content active if its recovery copy cannot be saved", async () => {
+    const disk = new FakeDisk();
+    disk.notes.set("mine.md", "d1");
+    disk.bodies.set("mine.md", "only local content");
+    await twoPasses({
+      disk,
+      first: { notes: [{ id: "d1", rel_path: "mine.md" }] },
+      then: { notes: [], tombstones: ["d1"] },
+      patch: () => {
+        vi.mocked(ipc.getDiskBase).mockResolvedValue(null as never);
+        vi.mocked(ipc.copyToTrash).mockRejectedValue(new Error("disk full"));
+      },
+    });
+    expect(disk.notes.has("mine.md")).toBe(true);
+    expect(disk.deleted).toEqual([]);
   });
 
   it("never re-registers the dead id after its unseen work was copied aside", async () => {

@@ -1346,8 +1346,18 @@ export async function deleteRegisteredFile(
 
 /**
  * Does `vaultId` hold at least one live note or file outside `readable`?
- * One EXISTS over the vault's live docs with an anti-join against the readable
- * set, so it stops at the first hidden row and never materialises a list.
+ *
+ * Counted, never anti-joined. The old shape was `EXISTS (... NOT EXISTS (SELECT
+ * 1 FROM r ...))` over a CTE of the readable ids, and EXISTS plans for the
+ * first row: Postgres picked a fast-start Nested Loop Anti Join that compared
+ * every live note against every readable id. On a 10.8k-note vault (15.9k
+ * readable ids) that was 85.7M comparisons — 13.9 s under EXPLAIN ANALYZE, and
+ * the bulk of `GET /api/notes`' ~6.4 s median on production (2026-10-13).
+ *
+ * Same answer, linear plan: per table, the vault's live rows vs how many of
+ * them are in `readable` (`= ANY` → bitmap scan of the primary key). Ids are
+ * primary keys, so duplicates in the array cannot inflate a count; a hidden row
+ * exists exactly when the two counts differ. ~70 ms on the same vault.
  */
 export async function vaultHasHiddenContent(
   vaultId: string,
@@ -1355,16 +1365,13 @@ export async function vaultHasHiddenContent(
 ): Promise<boolean> {
   const ids = [...readable];
   const { rows } = await pool.query<{ hidden: boolean }>(
-    `WITH r(id) AS (SELECT unnest($2::text[]))
-     SELECT EXISTS (
-       SELECT 1 FROM notes n
-        WHERE n.vault_id = $1 AND n.deleted_at IS NULL
-          AND NOT EXISTS (SELECT 1 FROM r WHERE r.id = n.id)
-       UNION ALL
-       SELECT 1 FROM files f
-        WHERE f.vault_id = $1
-          AND NOT EXISTS (SELECT 1 FROM r WHERE r.id = f.id)
-     ) AS hidden`,
+    `SELECT (SELECT count(*) FROM notes n
+              WHERE n.vault_id = $1 AND n.deleted_at IS NULL)
+          <> (SELECT count(*) FROM notes n
+              WHERE n.vault_id = $1 AND n.deleted_at IS NULL AND n.id = ANY ($2::text[]))
+         OR (SELECT count(*) FROM files f WHERE f.vault_id = $1)
+          <> (SELECT count(*) FROM files f WHERE f.vault_id = $1 AND f.id = ANY ($2::text[]))
+            AS hidden`,
     [vaultId, ids],
   );
   return rows[0]?.hidden === true;

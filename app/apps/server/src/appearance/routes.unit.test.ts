@@ -6,8 +6,8 @@ vi.mock("../http/session.js", () => ({ getSession: mocks.session }));
 vi.mock("../permissions/lookup.js", () => ({ orgRole: mocks.role }));
 vi.mock("../db/pool.js", () => ({ pool: { query: mocks.query, connect: mocks.connect } }));
 vi.mock("../sync/member-events.js", () => ({ announceAppearanceChanged: mocks.announce }));
-import { appearanceRoutes } from "../http/routes/appearance.js";
-const app = new Hono().route("/api", appearanceRoutes);
+import { createAppearanceRoutes } from "../http/routes/appearance.js";
+const app = new Hono().route("/api", createAppearanceRoutes());
 const patch = (settings: unknown) => app.request("/api/orgs/vault/appearance", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ settings }) });
 beforeEach(() => {
   vi.clearAllMocks();
@@ -30,9 +30,14 @@ describe("shared navigation appearance writes (no database)", () => {
     expect(mocks.query).not.toHaveBeenCalled();
   });
   it("merges a patch into existing settings and announces authoritative settings", async () => {
+    mocks.txQuery.mockImplementation(async (sql: string) => ({ rows:
+      sql.includes("RETURNING access_revision") ? [{ access_revision: 1 }] :
+      sql.includes("SELECT n.vault_id") ? [{ vault_id: "collection" }] :
+      sql.includes("INSERT INTO vault_appearance") ? [{ settings: { theme: "dark", homeDocId: "home-id" }, updated_by: "owner", updated_at: new Date("2026-01-01") }] : [] }));
     expect((await patch({ homeDocId: "home-id" })).status).toBe(200);
-    expect(mocks.query.mock.calls[0][0]).toContain("vault_appearance.settings || EXCLUDED.settings");
-    expect(mocks.query.mock.calls[0][1]).toEqual(["vault", JSON.stringify({ homeDocId: "home-id" }), "owner", true]);
+    const write = mocks.txQuery.mock.calls.find(([sql]) => sql.includes("INSERT INTO vault_appearance"))!;
+    expect(write[0]).toContain("vault_appearance.settings || EXCLUDED.settings");
+    expect(write[1]).toEqual(["vault", JSON.stringify({ homeDocId: "home-id" }), "owner", true]);
     expect(mocks.announce).toHaveBeenCalledWith({ orgId: "vault", settings: { theme: "dark", homeDocId: "home-id" }, updatedAt: "2026-01-01T00:00:00.000Z" });
   });
   it("rejects invalid paths before touching persistence", async () => {

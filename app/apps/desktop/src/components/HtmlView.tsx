@@ -69,22 +69,27 @@ export function HtmlView({ path }: { path: string }) {
   useEffect(() => {
     let cancelled = false;
     let loadNumber = 0;
+    let loaded: string | null = null;
     setMode("preview"); setDirty(false); setContent(null); setError(null);
     const load = async (changed = false) => {
       const thisLoad = ++loadNumber;
       try {
         const value = await ipc.readNote(path, epoch);
         if (cancelled || thisLoad !== loadNumber || changed && dirtyRef.current) return;
+        if (value === loaded) return;
         if (changed) await snapshotFrame(frame.current);
         if (cancelled || thisLoad !== loadNumber || changed && dirtyRef.current) return;
-        setContent(value); setDraft(value); setRevision((old) => old + 1);
+        loaded = value;
+        setError(null); setContent(value); setDraft(value); setRevision((old) => old + 1);
       } catch (e) { if (!cancelled) setError(String(e)); }
     };
     void load();
     let unlisten: (() => void) | undefined;
     void ipc.onFileChanged((event) => {
-      if (event.path === path && event.kind === "modified" && !event.unchanged && !dirtyRef.current) void load(true);
-    }).then((fn) => { if (cancelled) fn(); else unlisten = fn; });
+      // `unchanged` compares against the index, which sync writes before the
+      // watcher runs. The rendered page can still be older (even empty).
+      if (event.path === path && event.kind !== "removed" && !event.gone && !dirtyRef.current) void load(true);
+    }).then((fn) => { if (cancelled) fn(); else { unlisten = fn; void load(true); } });
     return () => { cancelled = true; unlisten?.(); };
   }, [path, epoch]);
   useEffect(() => {

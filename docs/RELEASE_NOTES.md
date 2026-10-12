@@ -23,6 +23,7 @@
 
 ## 0.1.82
 
+- Shared Home and pins update without a refresh. Synced dashboards refresh when their content arrives, and shared Home starts read-only with access managed through normal sharing controls.
 - Home and pins: choose any note as your Home and keep notes or folders close. Vault admins can also set a shared Home and pins for everyone.
 - Dashboards: open interactive HTML pages, start from an example, or save a dashboard link. Ask your agent to build the page from your notes, or update it with your installed Codex CLI.
 

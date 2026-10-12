@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+import { randomUUID } from "node:crypto";
+import { nextAccessRevision, type AccessChangeDeps } from "../../permissions/access-management.js";
 import { Hono } from "hono";
 import { pool } from "../../db/pool.js";
 import { orgRole } from "../../permissions/lookup.js";
@@ -17,8 +19,6 @@ import { getSession } from "../session.js";
  *    change uses (`announceOrgChanged`). PATCH merges supplied settings, or
  *    atomically toggles a `togglePin` item. No plan gate.
  */
-export const appearanceRoutes = new Hono();
-
 const ID_RE = /^[A-Za-z0-9._-]{1,128}$/;
 
 type Row = { settings: Record<string, unknown>; updated_by: string | null; updated_at: Date };
@@ -31,72 +31,131 @@ function body(row: Row | undefined) {
   };
 }
 
-appearanceRoutes.get("/orgs/:orgId/appearance", async (c) => {
-  const session = await getSession(c);
-  if (!session) return c.json({ error: "Authentication required" }, 401);
-  const orgId = c.req.param("orgId");
-  if (!ID_RE.test(orgId)) return c.json({ error: "not_member" }, 404);
-  const role = await orgRole(orgId, session.userId);
-  if (!role) return c.json({ error: "not_member" }, 404);
-  const { rows } = await pool.query<Row>(
-    "SELECT settings, updated_by, updated_at FROM vault_appearance WHERE organization_id = $1",
-    [orgId],
-  );
-  return c.json(body(rows[0]));
-});
+export function createAppearanceRoutes(deps: AccessChangeDeps = {}): Hono {
+  const appearanceRoutes = new Hono();
 
-appearanceRoutes.on(["PUT", "PATCH"], "/orgs/:orgId/appearance", async (c) => {
-  const session = await getSession(c);
-  if (!session) return c.json({ error: "Authentication required" }, 401);
-  const orgId = c.req.param("orgId");
-  if (!ID_RE.test(orgId)) return c.json({ error: "not_member" }, 404);
-  const role = await orgRole(orgId, session.userId);
-  if (!role) return c.json({ error: "not_member" }, 404);
-  if (role !== "owner" && role !== "admin") {
-    return c.json({ error: "access_manager_required" }, 403);
-  }
-  const raw = (await c.req.json().catch(() => null)) as { settings?: unknown; togglePin?: unknown } | null;
-  if (c.req.method === "PATCH" && raw?.togglePin !== undefined) {
-    const check = parseAppearance({ pinnedItems: [raw.togglePin] });
-    if (!check.ok) return c.json({ error: "invalid_appearance", key: "pinnedItems" }, 400);
-    let pin = check.settings.pinnedItems![0];
+  appearanceRoutes.get("/orgs/:orgId/appearance", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    const orgId = c.req.param("orgId");
+    if (!ID_RE.test(orgId)) return c.json({ error: "not_member" }, 404);
+    const role = await orgRole(orgId, session.userId);
+    if (!role) return c.json({ error: "not_member" }, 404);
+    const { rows } = await pool.query<Row>(
+      "SELECT settings, updated_by, updated_at FROM vault_appearance WHERE organization_id = $1",
+      [orgId],
+    );
+    return c.json(body(rows[0]));
+  });
+
+  appearanceRoutes.on(["PUT", "PATCH"], "/orgs/:orgId/appearance", async (c) => {
+    const session = await getSession(c);
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    const orgId = c.req.param("orgId");
+    if (!ID_RE.test(orgId)) return c.json({ error: "not_member" }, 404);
+    const role = await orgRole(orgId, session.userId);
+    if (!role) return c.json({ error: "not_member" }, 404);
+    if (role !== "owner" && role !== "admin") {
+      return c.json({ error: "access_manager_required" }, 403);
+    }
+    const raw = (await c.req.json().catch(() => null)) as { settings?: unknown; togglePin?: unknown } | null;
+    if (c.req.method === "PATCH" && raw?.togglePin !== undefined) {
+      const check = parseAppearance({ pinnedItems: [raw.togglePin] });
+      if (!check.ok) return c.json({ error: "invalid_appearance", key: "pinnedItems" }, 400);
+      let pin = check.settings.pinnedItems![0];
+      const db = await pool.connect();
+      let row: Row | undefined;
+      try {
+        await db.query("BEGIN");
+        if (pin.kind === "folder") {
+          // Keep the folder stable until the pin is saved. Folder moves lock the
+          // folder before rewriting appearance, so both operations share that
+          // lock order and a stale path cannot resurrect an old folder pin.
+          const folder = await db.query<{ path: string }>(
+            `SELECT path FROM folders WHERE vault_id IN
+               (SELECT id FROM vaults WHERE organization_id = $1)
+               AND vault_path_key(path) = vault_path_key($2) FOR SHARE`, [orgId, pin.path],
+          );
+          if (!folder.rows[0]) {
+            await db.query("ROLLBACK");
+            return c.json({ error: "folder_not_found" }, 404);
+          }
+          pin = { kind: "folder", path: folder.rows[0].path };
+        }
+        const samePin = `(p->>'kind' = $2::jsonb->>'kind' AND CASE WHEN p->>'kind' = 'folder'
+          THEN lower(p->>'path') = lower($2::jsonb->>'path') ELSE p->>'docId' = $2::jsonb->>'docId' END)`;
+        const { rows } = await db.query<Row>(
+          `INSERT INTO vault_appearance (organization_id, settings, updated_by, updated_at)
+             VALUES ($1, jsonb_build_object('pinnedItems', jsonb_build_array($2::jsonb)), $3, now())
+           ON CONFLICT (organization_id) DO UPDATE SET
+             settings = jsonb_set(vault_appearance.settings, '{pinnedItems}', CASE
+               WHEN EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(vault_appearance.settings->'pinnedItems', '[]'::jsonb)) p
+                 WHERE ${samePin}) THEN
+                 (SELECT COALESCE(jsonb_agg(p ORDER BY ordinal), '[]'::jsonb)
+                   FROM jsonb_array_elements(vault_appearance.settings->'pinnedItems') WITH ORDINALITY items(p, ordinal)
+                   WHERE NOT ${samePin})
+               ELSE COALESCE(vault_appearance.settings->'pinnedItems', '[]'::jsonb) || jsonb_build_array($2::jsonb)
+             END), updated_by = EXCLUDED.updated_by, updated_at = EXCLUDED.updated_at
+           WHERE COALESCE(jsonb_array_length(vault_appearance.settings->'pinnedItems'), 0) < 200
+             OR EXISTS (SELECT 1 FROM jsonb_array_elements(vault_appearance.settings->'pinnedItems') p WHERE ${samePin})
+           RETURNING settings, updated_by, updated_at`,
+          [orgId, JSON.stringify(pin), session.userId],
+        );
+        row = rows[0];
+        await db.query("COMMIT");
+      } catch (e) {
+        await db.query("ROLLBACK");
+        throw e;
+      } finally { db.release(); }
+      if (!row) return c.json({ error: "pin_limit_reached" }, 400);
+      const out = body(row);
+      await announceAppearanceChanged({ orgId, settings: out.settings, updatedAt: out.updatedAt as string });
+      return c.json(out);
+    }
+    const parsed = parseAppearance(raw?.settings);
+    if (!parsed.ok) {
+      return c.json({ error: "invalid_appearance", ...(parsed.key ? { key: parsed.key } : {}) }, 400);
+    }
     const db = await pool.connect();
     let row: Row | undefined;
+    let protectedHome: { vaultId: string; docId: string } | undefined;
     try {
       await db.query("BEGIN");
-      if (pin.kind === "folder") {
-        // Keep the folder stable until the pin is saved. Folder moves lock the
-        // folder before rewriting appearance, so both operations share that
-        // lock order and a stale path cannot resurrect an old folder pin.
-        const folder = await db.query<{ path: string }>(
-          `SELECT path FROM folders WHERE vault_id IN
-             (SELECT id FROM vaults WHERE organization_id = $1)
-             AND vault_path_key(path) = vault_path_key($2) FOR SHARE`, [orgId, pin.path],
+      const homeDocId = parsed.settings.homeDocId;
+      if (homeDocId) {
+        // Share access and the Home pointer commit together. Use the same ACL
+        // ordering lock as the ordinary sharing controls, preserving custom ACLs.
+        const revision = await nextAccessRevision(db, orgId);
+        const note = await db.query<{ vault_id: string }>(
+          `SELECT n.vault_id FROM notes n JOIN vaults v ON v.id = n.vault_id
+            WHERE n.id = $1 AND v.organization_id = $2 AND n.deleted_at IS NULL FOR SHARE OF n`, [homeDocId, orgId],
         );
-        if (!folder.rows[0]) {
+        if (!note.rows[0]) {
           await db.query("ROLLBACK");
-          return c.json({ error: "folder_not_found" }, 404);
+          return c.json({ error: "note_not_found" }, 404);
         }
-        pin = { kind: "folder", path: folder.rows[0].path };
+        const inserted = await db.query(
+          `INSERT INTO shares (id, org_id, resource_type, resource_id, principal_type,
+                               principal_id, permission, created_by, access_revision)
+           SELECT $1, $2, 'file', $3, 'org', $2, 'readonly', $4, $5
+            WHERE NOT EXISTS (SELECT 1 FROM shares WHERE org_id = $2
+              AND resource_type = 'file' AND resource_id = $3)
+              AND NOT EXISTS (SELECT 1 FROM vault_appearance WHERE organization_id = $2
+                AND settings->>'homeDocId' = $3)
+           ON CONFLICT DO NOTHING`,
+          [randomUUID(), orgId, homeDocId, session.userId, revision],
+        );
+        if (inserted.rowCount) protectedHome = { vaultId: note.rows[0].vault_id, docId: homeDocId };
       }
-      const samePin = `(p->>'kind' = $2::jsonb->>'kind' AND CASE WHEN p->>'kind' = 'folder'
-        THEN lower(p->>'path') = lower($2::jsonb->>'path') ELSE p->>'docId' = $2::jsonb->>'docId' END)`;
       const { rows } = await db.query<Row>(
         `INSERT INTO vault_appearance (organization_id, settings, updated_by, updated_at)
-           VALUES ($1, jsonb_build_object('pinnedItems', jsonb_build_array($2::jsonb)), $3, now())
-         ON CONFLICT (organization_id) DO UPDATE SET
-           settings = jsonb_set(vault_appearance.settings, '{pinnedItems}', CASE
-             WHEN EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(vault_appearance.settings->'pinnedItems', '[]'::jsonb)) p
-               WHERE ${samePin}) THEN
-               (SELECT COALESCE(jsonb_agg(p ORDER BY ordinal), '[]'::jsonb)
-                 FROM jsonb_array_elements(vault_appearance.settings->'pinnedItems') WITH ORDINALITY items(p, ordinal)
-                 WHERE NOT ${samePin})
-             ELSE COALESCE(vault_appearance.settings->'pinnedItems', '[]'::jsonb) || jsonb_build_array($2::jsonb)
-           END), updated_by = EXCLUDED.updated_by, updated_at = EXCLUDED.updated_at
-         WHERE COALESCE(jsonb_array_length(vault_appearance.settings->'pinnedItems'), 0) < 200
-           OR EXISTS (SELECT 1 FROM jsonb_array_elements(vault_appearance.settings->'pinnedItems') p WHERE ${samePin})
-         RETURNING settings, updated_by, updated_at`,
-        [orgId, JSON.stringify(pin), session.userId],
+            VALUES ($1, $2::jsonb, $3, now())
+       ON CONFLICT (organization_id)
+         DO UPDATE SET settings = CASE WHEN $4 THEN vault_appearance.settings || EXCLUDED.settings ELSE EXCLUDED.settings END,
+                       updated_by = EXCLUDED.updated_by,
+                       updated_at = EXCLUDED.updated_at
+       RETURNING settings, updated_by, updated_at`,
+        [orgId, JSON.stringify(parsed.settings), session.userId, c.req.method === "PATCH"],
       );
       row = rows[0];
       await db.query("COMMIT");
@@ -104,30 +163,18 @@ appearanceRoutes.on(["PUT", "PATCH"], "/orgs/:orgId/appearance", async (c) => {
       await db.query("ROLLBACK");
       throw e;
     } finally { db.release(); }
-    if (!row) return c.json({ error: "pin_limit_reached" }, 400);
+    if (protectedHome) {
+      try { deps.disconnectDoc?.(protectedHome.vaultId, protectedHome.docId); } catch { /* committed ACL survives a transport failure */ }
+      deps.onAclChanged?.(protectedHome.vaultId);
+    }
     const out = body(row);
-    await announceAppearanceChanged({ orgId, settings: out.settings, updatedAt: out.updatedAt as string });
+    await announceAppearanceChanged({
+      orgId,
+      settings: out.settings,
+      updatedAt: out.updatedAt as string,
+    });
     return c.json(out);
-  }
-  const parsed = parseAppearance(raw?.settings);
-  if (!parsed.ok) {
-    return c.json({ error: "invalid_appearance", ...(parsed.key ? { key: parsed.key } : {}) }, 400);
-  }
-  const { rows } = await pool.query<Row>(
-    `INSERT INTO vault_appearance (organization_id, settings, updated_by, updated_at)
-          VALUES ($1, $2::jsonb, $3, now())
-     ON CONFLICT (organization_id)
-       DO UPDATE SET settings = CASE WHEN $4 THEN vault_appearance.settings || EXCLUDED.settings ELSE EXCLUDED.settings END,
-                     updated_by = EXCLUDED.updated_by,
-                     updated_at = EXCLUDED.updated_at
-     RETURNING settings, updated_by, updated_at`,
-    [orgId, JSON.stringify(parsed.settings), session.userId, c.req.method === "PATCH"],
-  );
-  const out = body(rows[0]);
-  await announceAppearanceChanged({
-    orgId,
-    settings: out.settings,
-    updatedAt: out.updatedAt as string,
   });
-  return c.json(out);
-});
+
+  return appearanceRoutes;
+}

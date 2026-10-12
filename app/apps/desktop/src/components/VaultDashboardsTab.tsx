@@ -2,7 +2,7 @@
 import { useEffect, useState } from "react";
 import { useStore } from "../store";
 import { effectiveHomeNote, isDashboard } from "../lib/pins";
-import { readNote } from "../lib/ipc";
+import { readNote, onFileChanged } from "../lib/ipc";
 import { requestNewDashboard } from "../lib/homeEvents";
 import { DASHBOARD_TEMPLATES } from "../lib/dashboard/templates";
 import { toast } from "../lib/toast";
@@ -15,6 +15,14 @@ export function VaultDashboardsTab({ onClose, onNew, resetToken = 0 }: { onClose
   const home = effectiveHomeNote(st);
   const [saved, setSaved] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
+  const [contentRevision, setContentRevision] = useState(0);
+  useEffect(() => {
+    let alive = true, off: (() => void) | undefined;
+    void onFileChanged((event) => {
+      if (/\.html?$/i.test(event.path)) setContentRevision((r) => r + 1);
+    }).then((fn) => { if (alive) off = fn; else fn(); });
+    return () => { alive = false; off?.(); };
+  }, []);
   const paths = st.titles.filter((n) => isDashboard(n.path) && /\.html?$/i.test(n.path)).map((n) => n.path);
   const signature = JSON.stringify(paths);
   useEffect(() => {
@@ -37,7 +45,7 @@ export function VaultDashboardsTab({ onClose, onNew, resetToken = 0 }: { onClose
       if (alive) setSaved(result);
     })();
     return () => { alive = false; };
-  }, [signature, home?.path, st.vault?.epoch]);
+  }, [signature, home?.path, st.vault?.epoch, contentRevision]);
   const canUnset = !!st.personalHomeDocId || st.members.some((m) => m.userId === st.session?.user.id && ["owner", "admin"].includes(m.role));
   const currentId = Object.keys(saved).find((id) => saved[id] === home?.path);
   const useTemplate = async (id: string) => {

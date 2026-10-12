@@ -277,6 +277,9 @@ export async function previewFetch(
   const ok = (data: any) => response(data);
   const blocked = (message: string) =>
     response({ error: message, code: "preview_only" }, 503);
+  if (p === `/api/orgs/${ORG}/appearance` && method === "GET") {
+    return ok({ settings: initialStore.vaultAppearance[ORG], updatedAt: new Date(now).toISOString(), updatedBy: users[0].id });
+  }
   if (p === "/health")
     return ok({
       ok: true,
@@ -661,6 +664,7 @@ export async function previewFetch(
   );
 }
 export const initialStore = {
+  vaultAppearance: { [ORG]: { homeDocId: "preview-home", pinnedItems: [{ kind: "note", docId: "preview-home" }] } },
   members,
   pendingInvitations: invitations,
   userInvitations: [],

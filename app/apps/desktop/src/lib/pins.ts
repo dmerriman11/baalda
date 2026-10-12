@@ -65,6 +65,13 @@ export function isHomeNavigation(state: Parameters<typeof effectiveHomeNote>[0] 
   const home = effectiveHomeNote(state);
   return !!home && !state.activeVirtualTab && state.homeNavigationPath === home.path && state.openNote?.path === home.path;
 }
+/** Follow a changed shared Home only while visiting Home, never interrupt a file edit. */
+export function shouldFollowSharedHome(state: Parameters<typeof isHomeNavigation>[0]): boolean {
+  const home = effectiveHomeNote(state);
+  return !state.personalHomeDocId && !!home && !state.activeVirtualTab &&
+    !!state.homeNavigationPath && state.homeNavigationPath === state.openNote?.path &&
+    state.openNote.path !== home.path;
+}
 /** Only today's effective Home owns the temporary full-width layout. */
 export function homeSidebarVisitKey(state: Parameters<typeof effectiveHomeNote>[0] & {
   vault: { path: string } | null;

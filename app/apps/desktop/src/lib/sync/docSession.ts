@@ -310,6 +310,7 @@ export function aclSignalIsFresh(aclChangedAt: number, now: number): boolean {
 export type RegistryPullReason =
   | "channel-synced"
   | "registry-frame"
+  | "shared-navigation"
   | "reauth"
   | "acl-revoked"
   | "watcher"
@@ -4987,6 +4988,44 @@ export class SyncManager implements InboundHost {
     // The disk probe behind a `ready` runs before the run it may start.
     while (this.emptyProbe) await this.emptyProbe;
     await (this.bulkRun ?? Promise.resolve());
+  }
+
+  /** Settle ordinary content sync before publishing a Home with read-only access. */
+  async prepareSharedHome(docId: string, relPath: string, epoch: number): Promise<void> {
+    const scope = this.scope;
+    if (!this.enabled || !scope?.isCurrent() || scope.vaultEpoch !== epoch) {
+      throw new Error("Connect this vault before setting its shared Home.");
+    }
+    const token = await api.syncToken(docId);
+    if (!scope.isCurrent()) throw new Error("The open vault changed.");
+    // Existing read-only files already use the server's authoritative content.
+    if (token.readOnly || token.permission !== "edit") return;
+    if (this.currentDocId === docId && this.current) {
+      const current = this.current;
+      await current.whenSynced(5000);
+      const until = Date.now() + 30_000;
+      while (scope.isCurrent() && this.current === current && !this.registry.isPushed(docId) && Date.now() < until) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      if (!this.registry.isPushed(docId) || !scope.isCurrent() || this.current !== current || !(await current.whenFlushed(30_000))) {
+        throw new Error("Wait for this note to finish syncing before setting the vault Home.");
+      }
+      return;
+    }
+    // Use the normal single-writer queue, including pull-before-seed and echo
+    // guards. Do not open a second provider or change permissions over a push.
+    this.registry.unmarkPushed(docId);
+    this.divergedDocs.add(docId);
+    this.emptyEverywhere.delete(docId);
+    this.localChanges.set(docId, relPath);
+    this.armLocalChangeDrain(scope, 0);
+    const until = Date.now() + 30_000;
+    while (scope.isCurrent() && Date.now() < until) {
+      if (this.registry.isPushed(docId) && !this.localChanges.has(docId) && !this.divergedDocs.has(docId)) return;
+      if (this.permanentFailures.has(docId)) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    throw new Error("Wait for this note to finish syncing before setting the vault Home.");
   }
 
   /**

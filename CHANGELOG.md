@@ -22,6 +22,12 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   (#228).
 
 ### Fixed
+- Shared Home and pins resolve canonical synced identities, recover missed updates on reconnect,
+  and follow changes while viewing the shared Home. Publishing Home waits for content sync and
+  atomically adds the normal read-only file share when no explicit file permissions exist.
+  HTML previews reload on changed content even when the filesystem event is already indexed;
+  duplicate content leaves interactive frames intact. Pinned rows have more breathing room,
+  and New note / New folder lead both sidebar context menus.
 - **A view-only note stays view-only while it reconnects (desktop).** Each time the open note's
   connection renewed (its token refresh, any access change in the vault, a network blip), the app
   briefly reported the vault's "Synced" in place of the note's view-only grant. For up to about

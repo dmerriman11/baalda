@@ -969,3 +969,18 @@ Linked Claude/ChatGPT dashboard tabs use `dashboard_remote.rs` native child webv
 capabilities or vault bridge. Main-app commands requiring a caller must use the
 main `Webview` identity, since a multi-view window is no longer a `WebviewWindow`.
 React owns viewer bounds and lifetime; native viewers are hidden beneath app overlays.
+
+
+Shared Home and pins use the vault appearance channel with stable note IDs, not
+separate dashboard identities. Shared references are registered before publishing;
+clients resolve delayed references through the registry/index and refresh defaults
+on reconnect. An active shared Home follows a changed vault Home; an ordinary open
+file or personal Home does not. Publishing Home waits for the normal note upload
+before applying its default read-only file share. That default uses the existing
+org-wide cap (including managers); owners/admins can change it through normal
+sharing controls. Existing explicit file permissions are preserved. The permission
+and Home pointer commit together, with ordinary ACL and appearance broadcasts.
+HTML previews compare file content on watcher notifications, including indexed
+`unchanged` echoes: the preview may still contain the empty pre-sync document even
+when the disk index already has the newly received content. Bridge echo guards
+remain unchanged, and identical HTML does not reload interactive frames.

@@ -27,10 +27,10 @@
 .home-sidebar-row.is-unset:focus-visible { outline:1px dashed var(--accent); outline-offset:-1px; }
 .pinned-section { padding:4px 0 10px; max-height:32vh; overflow:auto; border-bottom:1px solid var(--border); }
 .pinned-label { padding:5px 12px; color:var(--text-secondary); font-size:11px; }
-.pinned-row { display:flex; padding-left:9px; padding-right:8px; }
-.pinned-open { display:flex; gap:7px; align-items:center; flex:1; min-width:0; background:transparent; border:0; color:inherit; text-align:left; padding:0; cursor:pointer; }
+.pinned-section .pinned-row { display:flex; min-height:30px; margin:2px 0; padding:3px 8px 3px 9px; box-sizing:border-box; }
+.pinned-open { display:flex; gap:7px; align-items:center; flex:1; min-width:0; background:transparent; border:0; color:inherit; text-align:left; padding:0; font:inherit; font-size:var(--fs-md); line-height:20px; cursor:pointer; }
 .pinned-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; }
-.pinned-shared { font-size:9px; color:var(--text-secondary); }
+.pinned-shared { flex-shrink:0; margin-left:6px; font-size:10px; color:var(--text-secondary); }
 .pinned-remove { border:0; background:transparent; color:var(--text-secondary); opacity:0; cursor:pointer; }
 .pinned-row:hover .pinned-remove, .pinned-row:focus-within .pinned-remove { opacity:1; }
 .home-picker-backdrop { position:fixed; inset:0; z-index:110; background:rgba(0,0,0,.3); display:flex; justify-content:center; align-items:center; padding:24px; -webkit-app-region:no-drag; }

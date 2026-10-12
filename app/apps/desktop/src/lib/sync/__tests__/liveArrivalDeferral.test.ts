@@ -205,31 +205,36 @@ beforeEach(() => {
 });
 
 describe("small arrivals land with their content, no placeholder first", () => {
-  it("a single live note from a teammate is created with its content in one write", async () => {
-    const t = setup(serverOnly(1));
+  it.each([
+    { path: "Remote/N0.md", content: "Hello from a teammate" },
+    { path: "Dashboards/Home.html", content: "<!doctype html><h1>Shared dashboard</h1>" },
+  ])("a live $path from a teammate is created with content in one write", async ({ path, content }) => {
+    const notes = serverOnly(1);
+    notes[0].rel_path = path;
+    const t = setup(notes);
     await t.pull();
 
     expect(placeholders()).toEqual([]);
-    expect(t.fs.get("Remote/N0.md")).toBeUndefined();
+    expect(t.fs.get(path)).toBeUndefined();
     expect(t.reg.pendingFromBootstrapCount()).toBe(1);
     expect(t.timerMs()).toBe(DEFERRED_ARRIVAL_WAIT_MS);
 
-    await t.store.applyUpdate("srv-0", serverState("Hello from a teammate"));
+    await t.store.applyUpdate("srv-0", serverState(content));
 
-    expect(t.contentWrites).toEqual([{ path: "Remote/N0.md", content: "Hello from a teammate" }]);
-    expect(t.fs.get("Remote/N0.md")).toBe("Hello from a teammate");
+    expect(t.contentWrites).toEqual([{ path: path, content: content }]);
+    expect(t.fs.get(path)).toBe(content);
     expect(t.pushed).toEqual(["srv-0"]);
     expect(t.reg.pendingFromBootstrapCount()).toBe(0);
     // The content-created file owes exactly one watcher echo.
-    expect(t.reg.consumeMaterialized("Remote/N0.md")).toBe(true);
-    expect(t.reg.consumeMaterialized("Remote/N0.md")).toBe(false);
+    expect(t.reg.consumeMaterialized(path)).toBe(true);
+    expect(t.reg.consumeMaterialized(path)).toBe(false);
     // The store now knows the doc, so the next `hello` names it.
     expect(t.store.knownDocs()).toContain("srv-0");
 
     // The window closing later writes nothing: no 0-byte file ever existed.
     await t.fireTimer();
     expect(placeholders()).toEqual([]);
-    expect(t.fs.get("Remote/N0.md")).toBe("Hello from a teammate");
+    expect(t.fs.get(path)).toBe(content);
   });
 
   it("confirming server content does not strand a new empty note before its file arrives", async () => {

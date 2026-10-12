@@ -97,6 +97,7 @@ vi.mock("../../ipc", () => ({
 
 vi.mock("../../auth/authManager", () => ({
   api: {
+    syncToken: vi.fn(async () => ({ readOnly: false, permission: "edit" })),
     listVaultBlobs: vi.fn(async () => []),
     downloadBlob: vi.fn(async () => new Uint8Array()),
     resetNoteHistory: vi.fn(async () => ({ bytesBefore: 0, bytesAfter: 0 })),
@@ -195,6 +196,7 @@ vi.mock("../syncManager", () => ({
   },
 }));
 
+import { api } from "../../auth/authManager";
 import type { SessionInfo } from "../../api";
 import { SyncManager } from "../docSession";
 import { vaultScopes } from "../vaultScope";
@@ -471,5 +473,32 @@ describe("SyncManager.syncLog", () => {
     expect(sm.syncLog().length).toBeGreaterThan(0);
     sm.disable();
     expect(sm.syncLog()).toEqual([]);
+  });
+});
+
+
+describe("SyncManager.prepareSharedHome", () => {
+  it("waits for the ordinary upload to confirm content before Home can become read-only", async () => {
+    fakeDisk.files.set(REL, "<!doctype html><h1>Shared Home</h1>");
+    const sm = manager();
+    await enable(sm);
+    await sm.prepareSharedHome(DOC, REL, 1);
+    expect(connects.order).toContain(DOC);
+    expect(fakeRegistry.isPushed(DOC)).toBe(true);
+  });
+
+  it("does not publish a Home whose initial content cannot be uploaded", async () => {
+    const sm = manager();
+    await enable(sm);
+    await expect(sm.prepareSharedHome(DOC, REL, 1)).rejects.toThrow("finish syncing");
+    expect(fakeRegistry.isPushed(DOC)).toBe(false);
+  });
+
+  it("keeps an existing read-only Home on the read path without trying to upload it", async () => {
+    const sm = manager();
+    await enable(sm);
+    vi.mocked(api.syncToken).mockResolvedValueOnce({ readOnly: true, permission: "view" } as Awaited<ReturnType<typeof api.syncToken>>);
+    await sm.prepareSharedHome(DOC, REL, 1);
+    expect(connects.order).toEqual([]);
   });
 });

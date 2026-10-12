@@ -47,7 +47,7 @@ import {
   type AppearanceSettings,
   type VaultAppearanceSettings,
 } from "./lib/appearanceSettings";
-import { readPersonalPins, readPersonalHome, writePersonalPins, writePersonalHome, renamePinnedFolders, togglePinned, effectiveHomeNote, type PinnedItem } from "./lib/pins";
+import { readPersonalPins, readPersonalHome, writePersonalPins, writePersonalHome, renamePinnedFolders, togglePinned, effectiveHomeNote, shouldFollowSharedHome, type PinnedItem } from "./lib/pins";
 import { applyEffectiveTheme, type ThemeMode } from "./lib/theme";
 import { syncManager } from "./lib/sync/docSession";
 import { vaultScopes } from "./lib/sync/vaultScope";
@@ -2127,8 +2127,19 @@ export const useStore = create<AppStore>((set, get) => ({
     const vault = get().vault;
     if (!vault) return;
     const epoch = vault.epoch;
-    const docId = isDir ? null : get().titles.find((t) => t.path === path)?.id ?? (await ipc.getNoteMeta(path))?.id;
+    let docId = isDir ? null : get().titles.find((t) => t.path === path)?.id ?? (await ipc.getNoteMeta(path))?.id;
     if (!sameVault(get, epoch) || (!isDir && !docId)) return;
+    if (scope === "vault" && !isDir) {
+      const mapping = await syncManager.registry.registerNote(path, null, docId!);
+      if (!sameVault(get, epoch)) return;
+      if (!mapping) throw new Error("This note has not synced yet. Try again when connected.");
+      docId = mapping.docId;
+    }
+    if (scope === "vault" && isDir) {
+      const folderId = await syncManager.registry.registerFolder(path, path.split("/").pop()!);
+      if (!sameVault(get, epoch)) return;
+      if (!folderId) throw new Error("This folder has not synced yet. Try again when connected.");
+    }
     const item: PinnedItem = isDir ? { kind: "folder", path } : { kind: "note", docId: docId! };
     if (scope === "personal") {
       const next = togglePinned(get().personalPins, item);
@@ -2145,8 +2156,16 @@ export const useStore = create<AppStore>((set, get) => ({
     const vault = get().vault;
     if (!vault) return;
     const epoch = vault.epoch;
-    const docId = path ? get().titles.find((t) => t.path === path)?.id ?? (await ipc.getNoteMeta(path))?.id : null;
+    let docId = path ? get().titles.find((t) => t.path === path)?.id ?? (await ipc.getNoteMeta(path))?.id : null;
     if (!sameVault(get, epoch) || (path && !docId)) return;
+    if (scope === "vault" && path) {
+      const mapping = await syncManager.registry.registerNote(path, null, docId!);
+      if (!sameVault(get, epoch)) return;
+      if (!mapping) throw new Error("This note has not synced yet. Try again when connected.");
+      docId = mapping.docId;
+      await syncManager.prepareSharedHome(docId, path, epoch);
+      if (!sameVault(get, epoch)) return;
+    }
     if (scope === "personal") {
       writePersonalHome(vault.path, docId ?? null);
       set({ personalHomeDocId: docId ?? null, homeActivation: null });
@@ -2154,6 +2173,11 @@ export const useStore = create<AppStore>((set, get) => ({
       const orgId = get().syncEnabled ? get().session?.activeOrganizationId : null;
       if (!orgId) throw new Error("A synced vault is required");
       const res = await authManager.api.patchVaultAppearance(orgId, { homeDocId: docId ?? null });
+      if (sameVault(get, epoch) && path) {
+        // Choosing the vault Home explicitly also means using it on this device.
+        writePersonalHome(vault.path, null);
+        set({ personalHomeDocId: null });
+      }
       get().receiveVaultAppearance(orgId, res.settings);
     }
     if (path && sameVault(get, epoch)) get().setHomeSectionHidden(false);
@@ -2400,6 +2424,7 @@ export const useStore = create<AppStore>((set, get) => ({
     if (!sameVault(get, epoch)) return;
     followLocalIndexedMoves(titles);
     set({ titles });
+    if (shouldFollowSharedHome(get())) void get().openHome(false).catch((e) => console.warn("[home] update failed", e));
     if (get().homeLandingPending && !get().openNote && !get().openingNotePath && !get().activeVirtualTab) void get().openHome(false).catch((e) => console.warn("[home] landing failed", e));
     // Tags ride along with titles: both are index-derived completion sources
     // refreshed at the same moments (vault open, note create, structural
@@ -3027,13 +3052,14 @@ export const useStore = create<AppStore>((set, get) => ({
       return (relPath) => effectiveLockForPath(map, relPath) != null;
     });
     syncManager.setSyncPauseListener((pause) => set({ syncPause: pause }));
-    syncManager.setVaultStatusListener((status) =>
-      set(
-        status === "synced"
-          ? { vaultSyncStatus: status, vaultReadySeen: true }
-          : { vaultSyncStatus: status === "idle" ? "offline" : status },
-      ),
-    );
+    syncManager.setVaultStatusListener((status) => {
+      set(status === "synced"
+        ? { vaultSyncStatus: status, vaultReadySeen: true }
+        : { vaultSyncStatus: status === "idle" ? "offline" : status });
+      // Home/pins can change while disconnected without any file changing.
+      const orgId = get().syncEnabled ? get().session?.activeOrganizationId : null;
+      if (status === "synced" && orgId) void get().loadVaultAppearance(orgId);
+    });
     // The server refused our session at token mint and a fresh session check
     // agreed it is gone (`sync/sessionGuard.ts`). Fires at most once per
     // session — this is what makes an expiry mid-run visible NOW instead of at
@@ -3571,9 +3597,27 @@ export const useStore = create<AppStore>((set, get) => ({
   },
 
   receiveVaultAppearance: (orgId, settings) => {
+    const previous = get().vaultAppearance[orgId];
+    const navigationChanged = previous?.homeDocId !== settings.homeDocId ||
+      JSON.stringify(previous?.pinnedItems ?? []) !== JSON.stringify(settings.pinnedItems ?? []);
     set({ vaultAppearance: { ...get().vaultAppearance, [orgId]: settings },
       ...(get().vaultAppearance[orgId]?.homeDocId !== settings.homeDocId ? { homeActivation: null } : {}) });
     get().applyAppearance();
+    if (get().syncEnabled && get().session?.activeOrganizationId === orgId) {
+      // The preference frame may beat the referenced file's materialization.
+      // Refresh its normal registry/index path; keep the saved reference until
+      // readable content arrives instead of requiring a restart to find it.
+      const ids = new Set(get().titles.map((note) => note.id));
+      const missingHome = settings.homeDocId && !ids.has(settings.homeDocId);
+      const missingPin = settings.pinnedItems?.some((pin) => pin.kind === "note"
+        ? !ids.has(pin.docId) : !get().tree || !nodeAt(get().tree!, pin.path));
+      if (navigationChanged && (missingHome || missingPin)) {
+        syncManager.handleRegistryChanged("shared-navigation");
+        void get().refreshTitles().catch((e) => console.warn("[home] index refresh failed", e));
+        void get().refreshTree().catch((e) => console.warn("[home] tree refresh failed", e));
+      }
+      if (shouldFollowSharedHome(get())) void get().openHome(false).catch((e) => console.warn("[home] update failed", e));
+    }
     if (get().homeLandingPending && !get().openNote && !get().openingNotePath && !get().activeVirtualTab) void get().openHome(false).catch((e) => console.warn("[home] landing failed", e));
   },
 

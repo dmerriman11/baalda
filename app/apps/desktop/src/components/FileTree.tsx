@@ -1997,17 +1997,6 @@ export function FileTree() {
                 { left: menu.x, top: menu.y, visibility: "hidden" }
           }
         >
-          {navigationGroups.map((kind) => (
-            <li key={kind} role="menuitem" tabIndex={0}
-              className={`menu-sub-row${sub?.kind === kind ? " open" : ""}`}
-              aria-haspopup="menu" aria-expanded={sub?.kind === kind}
-              onMouseEnter={(event) => openSub(kind, event.currentTarget)}
-              onMouseLeave={closeSubSoon}
-              onClick={(event) => { event.stopPropagation(); openSub(kind, event.currentTarget); }}>
-              <span className="menu-sub-label">{kind === "dashboard" ? "Dashboard" : kind === "pin" ? "Pin" : "Home"}</span>
-              <span className="menu-sub-chevron" aria-hidden="true">›</span>
-            </li>
-          ))}
           {/* Creating at a frozen root is refused; the items stay clickable so
               the refusal toast can say why, but they read as unavailable. */}
           <li
@@ -2024,6 +2013,17 @@ export function FileTree() {
           >
             New folder
           </li>
+          {navigationGroups.map((kind) => (
+            <li key={kind} role="menuitem" tabIndex={0}
+              className={`menu-sub-row${sub?.kind === kind ? " open" : ""}`}
+              aria-haspopup="menu" aria-expanded={sub?.kind === kind}
+              onMouseEnter={(event) => openSub(kind, event.currentTarget)}
+              onMouseLeave={closeSubSoon}
+              onClick={(event) => { event.stopPropagation(); openSub(kind, event.currentTarget); }}>
+              <span className="menu-sub-label">{kind === "dashboard" ? "Dashboard" : kind === "pin" ? "Pin" : "Home"}</span>
+              <span className="menu-sub-chevron" aria-hidden="true">›</span>
+            </li>
+          ))}
           <li
             className={
               menuCreateBlocked ? "menu-sep-item disabled" : "menu-sep-item"

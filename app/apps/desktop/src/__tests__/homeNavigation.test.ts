@@ -4,11 +4,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 
-vi.mock("../lib/auth/authManager", () => ({ authManager: { getServerUrl: () => "http://localhost:3010", api: {} }, api: {} }));
-vi.mock("../lib/sync/docSession", () => ({ syncManager: {} }));
+vi.mock("../lib/auth/authManager", () => ({ authManager: { getServerUrl: () => "http://localhost:3010", api: { patchVaultAppearance: vi.fn(), toggleVaultPin: vi.fn() } }, api: {} }));
+vi.mock("../lib/sync/docSession", () => ({ syncManager: { handleRegistryChanged: vi.fn(), prepareSharedHome: vi.fn(), registry: { registerNote: vi.fn(), registerFolder: vi.fn() } } }));
 vi.mock("../lib/bridge", () => ({ bridgeManager: {} }));
 vi.mock("../components/FileTree", () => ({ iconForPath: () => null, SidebarPresence: () => null }));
 import { useStore } from "../store";
+import { authManager } from "../lib/auth/authManager";
+import { syncManager } from "../lib/sync/docSession";
 import { HomeSection } from "../components/HomeNavigation";
 import { readHomeSectionHidden } from "../lib/prefs";
 
@@ -164,6 +166,37 @@ describe("Home navigation", () => {
     expect(renderHome()).toContain("Unset vault Home for everyone");
   });
 
+  it("follows a live shared Home change while visiting Home, without interrupting an ordinary file", async () => {
+    const next = { id: "next", path: "Dashboards/Next.html", title: "Next" };
+    useStore.setState({ syncEnabled: true, personalHomeDocId: null,
+      session: { user: { id: "me", name: "Me", email: "me@example.com" }, activeOrganizationId: "org" },
+      vaultAppearance: { org: { homeDocId: home.id } }, titles: [home, next],
+      openNote: home, homeNavigationPath: home.path,
+    });
+    useStore.getState().receiveVaultAppearance("org", { homeDocId: next.id });
+    expect(useStore.getState().openNoteByPath).toHaveBeenCalledWith(next.path, "home");
+    vi.mocked(useStore.getState().openNoteByPath).mockClear();
+    useStore.setState({ homeNavigationPath: null, openNote: home });
+    useStore.getState().receiveVaultAppearance("org", { homeDocId: home.id });
+    expect(useStore.getState().openNoteByPath).not.toHaveBeenCalled();
+  });
+
+  it("requests missing shared Home and pin files through normal sync when the setting arrives first", () => {
+    const refreshTitles = vi.fn(async () => {}), refreshTree = vi.fn(async () => {});
+    useStore.setState({ syncEnabled: true, personalHomeDocId: null,
+      session: { user: { id: "me", name: "Me", email: "me@example.com" }, activeOrganizationId: "org" },
+      vaultAppearance: {}, refreshTitles, refreshTree,
+    });
+    const settings = { homeDocId: "new-home", pinnedItems: [{ kind: "note" as const, docId: "new-pin" }] };
+    useStore.getState().receiveVaultAppearance("org", settings);
+    expect(syncManager.handleRegistryChanged).toHaveBeenCalledWith("shared-navigation");
+    expect(refreshTitles).toHaveBeenCalledOnce();
+    expect(refreshTree).toHaveBeenCalledOnce();
+    expect(useStore.getState().vaultAppearance.org).toEqual(settings);
+    useStore.getState().receiveVaultAppearance("org", settings);
+    expect(refreshTitles).toHaveBeenCalledOnce();
+  });
+
   it("offers templates without overwriting an unavailable Home preference", async () => {
     useStore.setState({ titles: [] });
     expect(renderHome()).toContain("Set a home");
@@ -183,4 +216,30 @@ describe("Home navigation", () => {
     }
     expect(useStore.getState().homeActivation).toBeNull();
   });
+});
+
+
+it("settles a shared Home under its canonical synced identity before publishing it", async () => {
+  useStore.setState({ syncEnabled: true, session: { user: { id: "owner" }, activeOrganizationId: "org" } as never,
+    refreshTitles: vi.fn(async () => {}), refreshTree: vi.fn(async () => {}) });
+  const calls: string[] = [];
+  vi.mocked(syncManager.registry.registerNote).mockResolvedValue({ docId: "canonical-home", vaultId: "collection" });
+  vi.mocked(syncManager.prepareSharedHome).mockImplementation(async () => { calls.push("content-confirmed"); });
+  vi.mocked(authManager.api.patchVaultAppearance).mockImplementation(async (_org, settings) => {
+    calls.push("published"); return { settings, updatedAt: null, updatedBy: null };
+  });
+  await useStore.getState().setHome(home.path, "vault");
+  expect(calls).toEqual(["content-confirmed", "published"]);
+  expect(syncManager.prepareSharedHome).toHaveBeenCalledWith("canonical-home", home.path, 1);
+  expect(authManager.api.patchVaultAppearance).toHaveBeenCalledWith("org", { homeDocId: "canonical-home" });
+  expect(useStore.getState().personalHomeDocId).toBeNull();
+});
+
+it("pins a new note using its canonical server identity", async () => {
+  useStore.setState({ syncEnabled: true, session: { user: { id: "owner" }, activeOrganizationId: "org" } as never,
+    refreshTitles: vi.fn(async () => {}), refreshTree: vi.fn(async () => {}) });
+  vi.mocked(syncManager.registry.registerNote).mockResolvedValue({ docId: "canonical-note", vaultId: "collection" });
+  vi.mocked(authManager.api.toggleVaultPin).mockResolvedValue({ settings: { pinnedItems: [{ kind: "note", docId: "canonical-note" }] }, updatedAt: null, updatedBy: null });
+  await useStore.getState().togglePin(home.path, false, "vault");
+  expect(authManager.api.toggleVaultPin).toHaveBeenCalledWith("org", { kind: "note", docId: "canonical-note" });
 });

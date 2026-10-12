@@ -1,10 +1,11 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "../src/http/app.js";
 import { recordingAppDeps } from "./helpers/app.js";
+import { effectivePermission } from "../src/permissions/resolver.js";
 import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
 import { authHeaders, createOrg, signUp, type TestUser } from "./helpers/auth.js";
-import { seedMember, seedVault, seedFolder, seedVaultGrant } from "./helpers/seed.js";
+import { seedMember, seedVault, seedFolder, seedVaultGrant, seedNote } from "./helpers/seed.js";
 import {
   setAppearanceChangedPublisher,
   type AppearanceChangedFields,
@@ -123,7 +124,8 @@ describe("vault appearance", () => {
   });
 
   it("PATCH preserves unrelated appearance and concurrent pin toggles", async () => {
-    const { owner, member, orgId } = await setup();
+    const { owner, member, orgId, vaultId } = await setup();
+    await seedNote(vaultId, null, "Home.html", owner.userId, "home");
     await put(owner, orgId, { theme: "dark" });
     const patch = (caller: TestUser, body: unknown) => app.request(`/api/orgs/${orgId}/appearance`, { method: "PATCH", headers: { ...authHeaders(caller), "content-type": "application/json" }, body: JSON.stringify(body) });
     const responses = await Promise.all([
@@ -160,6 +162,42 @@ describe("vault appearance", () => {
     expect(saved.settings.pinnedItems).toContainEqual({ kind: "note", docId: "stable-note" });
     expect(saved.settings.pinnedItems.some((item) => item.path?.startsWith("Projects"))).toBe(false);
     expect(saved.settings.pinnedItems.some((item) => item.path === "Work")).toBe(pin.status === 404);
+  });
+
+  it("publishes shared Home with ordinary read-only file access and preserves later sharing choices", async () => {
+    const { owner, admin, member, orgId, vaultId } = await setup();
+    await seedVaultGrant(orgId, "edit");
+    const folder = await seedFolder(vaultId, null, "Dashboards", "Dashboards");
+    const home = await seedNote(vaultId, folder, "Dashboards/Home.html", owner.userId);
+    const patch = () => app.request(`/api/orgs/${orgId}/appearance`, {
+      method: "PATCH", headers: { ...authHeaders(admin), "content-type": "application/json" },
+      body: JSON.stringify({ settings: { homeDocId: home } }),
+    });
+    expect((await patch()).status).toBe(200);
+    expect(await (await get(member, orgId)).json()).toMatchObject({ settings: { homeDocId: home } });
+    expect((await pool.query("SELECT permission FROM shares WHERE resource_id = $1", [home])).rows)
+      .toEqual([{ permission: "readonly" }]);
+    expect(await effectivePermission(member.userId, home)).toBe("view");
+    expect(rec.aclBroadcasts).toContain(vaultId);
+    expect(rec.disconnected).toContainEqual({ vaultId, docId: home });
+    expect(published.at(-1)?.change.settings).toEqual({ homeDocId: home });
+    // Change access using the same control as a Markdown note. Setting Home
+    // again must not undo the owner's explicit choice.
+    const access = await app.request(`/api/orgs/${orgId}/access/bulk`, {
+      method: "POST", headers: { ...authHeaders(owner), "content-type": "application/json" },
+      body: JSON.stringify({ resources: [{ resourceType: "file", resourceId: home }], audience: { type: "org" }, mode: "open" }),
+    });
+    expect(access.status).toBe(200);
+    expect((await patch()).status).toBe(200);
+    expect((await pool.query("SELECT permission FROM shares WHERE resource_id = $1", [home])).rows)
+      .toEqual([{ permission: "edit" }]);
+  });
+
+  it("rejects a Home reference outside the vault without publishing or changing access", async () => {
+    const { owner, orgId } = await setup();
+    expect((await put(owner, orgId, { homeDocId: "missing" })).status).toBe(404);
+    expect(published).toEqual([]);
+    expect((await pool.query("SELECT * FROM shares WHERE resource_id = 'missing'")).rows).toEqual([]);
   });
 
   it("the pubsub frame round-trips", () => {

@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, type CSSProperties } from "react";
 import { useStore } from "../store";
-import { requestNewDashboard as dispatchNewDashboard } from "../lib/homeEvents";
-import { mergePins, visiblePinnedItems, pinKey, resolveHome, isDashboard } from "../lib/pins";
+import { requestNewDashboard as dispatchNewDashboard, type DashboardCreationIntent } from "../lib/homeEvents";
+import { mergePins, visiblePinnedItems, pinKey, effectiveHomeNote, homeSidebarVisitKey } from "../lib/pins";
 import { displayName } from "../lib/notePath";
 import { nodeAt } from "../lib/tree/lazyTree";
 import { itemColorValue, itemColorFill, automaticTreeColors } from "../lib/appearance";
@@ -14,11 +14,63 @@ import { iconForPath, SidebarPresence } from "./FileTree";
 import { toast } from "../lib/toast";
 import "./HomeNavigation.css";
 
-export function requestNewDashboard(kind?: "link") {
+export function requestNewDashboard(kind?: "link", intent?: DashboardCreationIntent) {
   useStore.setState({ homePickerOpen: false });
-  dispatchNewDashboard(kind);
+  dispatchNewDashboard(kind, intent);
 }
 const onError = (e: unknown) => toast(e instanceof Error ? e.message : String(e), "error");
+
+export function HomeSection() {
+  const st = useStore();
+  const home = effectiveHomeNote(st);
+  const menu = useRef<HTMLDetailsElement>(null);
+  const orgId = st.syncEnabled ? st.session?.activeOrganizationId : null;
+  const sharedHome = orgId ? st.vaultAppearance[orgId]?.homeDocId : null;
+  const canManage = !!orgId && st.members.some((member) => member.userId === st.session?.user.id && (member.role === "owner" || member.role === "admin"));
+  const closeMenu = () => { if (menu.current) menu.current.open = false; };
+  useEffect(() => {
+    const dismissOutside = (event: PointerEvent) => {
+      if (menu.current?.open && !menu.current.contains(event.target as Node)) closeMenu();
+    };
+    document.addEventListener("pointerdown", dismissOutside);
+    return () => document.removeEventListener("pointerdown", dismissOutside);
+  }, []);
+  if (st.homeSectionHidden) return null;
+  const selected = homeSidebarVisitKey(st) !== null;
+  const label = home ? displayName(home.path.split("/").pop() ?? home.path, false) : "Set a home";
+  return <section className="home-section" aria-label="Home">
+    <div className="pinned-label">Home</div>
+    <div className="home-sidebar-entry" onContextMenu={(event) => {
+      if (!menu.current) return;
+      event.preventDefault(); menu.current.open = true;
+      menu.current.querySelector<HTMLButtonElement>("button")?.focus();
+    }}>
+    <button className={`home-sidebar-row${selected ? " selected" : ""}${!home ? " is-unset" : ""}`}
+      aria-current={selected ? "page" : undefined}
+      title={home ? `Open Home: ${home.path}` : "Choose a template for your Home dashboard"}
+      onClick={() => { if (home) void st.openHome(true, true).catch(onError); else requestNewDashboard(undefined, { setAsHome: true }); }}>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m3 10 9-7 9 7v11h-6v-7H9v7H3z" /></svg>
+      <span>{label}</span>
+    </button>
+    <details ref={menu} className="home-sidebar-menu"
+      onPointerDown={(event) => event.stopPropagation()}
+      onMouseDown={(event) => event.stopPropagation()}
+      onClick={(event) => event.stopPropagation()}
+      // WebKit may blur the summary with no relatedTarget before a menu button
+      // click. Outside pointerdown handles that case without removing its target.
+      onBlur={(event) => { if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget)) closeMenu(); }}
+      onKeyDown={(event) => { if (event.key === "Escape") { event.stopPropagation(); closeMenu(); menu.current?.querySelector<HTMLElement>("summary")?.focus(); } }}>
+      <summary className="icon-btn" aria-label="Home options" title="Home options">···</summary>
+      <div className="home-sidebar-menu-items">
+        <button type="button" onClick={() => { closeMenu(); useStore.setState({ homePickerOpen: true }); }}>Change Home…</button>
+        {st.personalHomeDocId && <button type="button" onClick={() => { closeMenu(); void st.setHome(null, "personal").catch(onError); }}>{sharedHome ? "Use vault Home instead" : "Unset Home"}</button>}
+        {sharedHome && canManage && <button type="button" onClick={() => { closeMenu(); void st.setHome(null, "vault").catch(onError); }}>Unset vault Home for everyone</button>}
+        <button type="button" onClick={() => { closeMenu(); st.setHomeSectionHidden(true); }}>Hide Home section</button>
+      </div>
+    </details>
+    </div>
+  </section>;
+}
 
 export function PinnedSection() {
   const st = useStore();
@@ -58,7 +110,7 @@ export function PinnedSection() {
       const color = st.itemColors[path] ?? automatic[path];
       const lock = st.syncEnabled ? effectiveLockForPath(locks, path) : null;
       const peers = st.vaultPresence.filter((peer) => peer.docId && (item.kind === "note" ? peer.docId === item.docId : st.titles.some((t) => t.id === peer.docId && t.path.startsWith(path + "/"))));
-      return <div key={pinKey(item)} className={`tree-row pinned-row${item.kind === "folder" ? " is-dir" : ""}${st.openNote?.path === path ? " selected" : ""}`}>
+      return <div key={pinKey(item)} className={`tree-row pinned-row${item.kind === "folder" ? " is-dir" : ""}${st.openNote?.path === path && (st.homeSectionHidden || homeSidebarVisitKey(st) === null) ? " selected" : ""}`}>
         <button className="pinned-open" title={path} onClick={() => item.kind === "folder"
           ? useStore.setState({ revealRequest: { path, edit: false, token: (st.revealRequest?.token ?? 0) + 1 } })
           : void st.openNoteByPath(path).catch(onError)}>
@@ -76,67 +128,11 @@ export function PinnedSection() {
   </section>;
 }
 
-export function HomeButton() {
-  const [hint, setHint] = useState(() => { try { return localStorage.getItem("context.home.hintShown") !== "1"; } catch { return false; } });
-  const seen = () => { setHint(false); try { localStorage.setItem("context.home.hintShown", "1"); } catch { /* unavailable */ } };
-  return <div className="home-tools">
-    <button className="titlebar-tool home-button" title={`${document.documentElement.dataset.platform === "windows" ? "Home (Ctrl+Shift+H)" : "Home (⌘⇧H)"} · Right-click to choose a dashboard`} aria-label="Home"
-      onClick={() => { seen(); void useStore.getState().openHome().catch(onError); }}
-      onContextMenu={(event) => { event.preventDefault(); seen(); useStore.setState({ homePickerOpen: true }); }}
-      onKeyDown={(event) => {
-        if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
-          event.preventDefault(); seen(); useStore.setState({ homePickerOpen: true });
-        }
-      }}>
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="m3 10 9-7 9 7v11h-6v-7H9v7H3z" /></svg>
-      {hint && <span className="home-hint" />}
-    </button>
-  </div>;
-}
-
+/** All Home entry points open the same dashboard gallery. */
 export function HomePicker() {
-  const st = useStore();
-  const panel = useRef<HTMLDivElement>(null);
+  const open = useStore((s) => s.homePickerOpen);
   useEffect(() => {
-    if (!st.homePickerOpen) return;
-    panel.current?.querySelector<HTMLButtonElement>("button")?.focus();
-    const close = (e: KeyboardEvent) => { if (e.key === "Escape") useStore.setState({ homePickerOpen: false }); };
-    window.addEventListener("keydown", close);
-    return () => window.removeEventListener("keydown", close);
-  }, [st.homePickerOpen]);
-  if (!st.homePickerOpen) return null;
-  const orgId = st.syncEnabled ? st.session?.activeOrganizationId : null;
-  const appearance = orgId ? st.vaultAppearance[orgId] : undefined;
-  const home = resolveHome(st.personalHomeDocId, appearance?.homeDocId);
-  const pinned = new Set(mergePins(appearance?.pinnedItems ?? [], st.personalPins).flatMap(({ item }) => item.kind === "note" ? [item.docId] : []));
-  const dashboards = st.titles.filter((t) => isDashboard(t.path)).sort((a, b) => Number(b.id === home) - Number(a.id === home) || Number(pinned.has(b.id)) - Number(pinned.has(a.id)) || a.path.localeCompare(b.path));
-  const homeNote = st.titles.find((t) => t.id === home);
-  const canManage = st.members.some((m) => m.userId === st.session?.user.id && (m.role === "owner" || m.role === "admin"));
-  const list = homeNote && !isDashboard(homeNote.path) ? [homeNote, ...dashboards] : dashboards;
-  return <div className="home-picker-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) useStore.setState({ homePickerOpen: false }); }}>
-    <div className="home-picker" ref={panel} role="dialog" aria-modal="true" aria-labelledby="home-picker-title" onKeyDown={(event) => {
-      event.stopPropagation();
-      if ((event.metaKey || event.ctrlKey) && ["n", "w", "h", "r", "g", "f", "k", "p", "s"].includes(event.key.toLowerCase())) event.preventDefault();
-      if (event.key === "Escape") useStore.setState({ homePickerOpen: false });
-      if (event.key === "Tab") {
-        const buttons = Array.from(panel.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? []);
-        const first = buttons[0], last = buttons[buttons.length - 1];
-        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
-        if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
-      }
-    }}>
-      <div className="home-picker-header"><h2 id="home-picker-title">Home & dashboards</h2><button aria-label="Close" onClick={() => useStore.setState({ homePickerOpen: false })}>×</button></div>
-      {!homeNote && <p>Choose a note as your Home, or create a dashboard your agent can update from your vault.</p>}
-      <div className="home-picker-list">{list.map((note) => <div className="home-picker-row" key={note.id}>
-        <button className="home-picker-open" title={note.path} onClick={() => { useStore.setState({ homePickerOpen: false }); void st.openNoteByPath(note.path).catch(onError); }}><span>{iconForPath(note.path)}</span><span>{displayName(note.path.split("/").pop() ?? note.path, false)}<small>{note.id === home ? "Home" : note.path}</small></span></button>
-        <button title="Set as my home" aria-label={`Set ${note.path} as my home`} onClick={() => void st.setHome(note.path).catch(onError)}>My home</button>
-        {canManage && orgId && <button title="Set as vault home for everyone" onClick={() => void st.setHome(note.path, "vault").catch(onError)}>Vault home</button>}
-      </div>)}</div>
-      {list.length === 0 && <p className="home-picker-empty">Dashboards are HTML files in your vault. Start with a template, add a link, or ask your agent to create one.</p>}
-      <div className="home-picker-actions"><button onClick={() => requestNewDashboard()}>New dashboard…</button><button onClick={() => requestNewDashboard("link")}>Add dashboard link…</button></div>
-      {st.openNote && <button className="home-picker-current" onClick={() => void st.setHome(st.openNote!.path).catch(onError)}>Use the current note as my home</button>}
-      {st.personalHomeDocId && <button className="home-picker-current" onClick={() => void st.setHome(null).catch(onError)}>Use vault home instead</button>}
-      <p className="home-picker-help">Ask Claude or Codex to edit the file in your vault, or connect an agent through MCP. The dashboard stays a normal, shareable file.</p>
-    </div>
-  </div>;
+    if (open) requestNewDashboard(undefined, { manage: true, setAsHome: true });
+  }, [open]);
+  return null;
 }

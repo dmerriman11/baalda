@@ -19,7 +19,7 @@ export function detectInstalledAgents(): Promise<InstalledAgent[]> {
   return detection ??= invoke<InstalledAgent[]>("detect_agents");
 }
 export function runDashboardAgent(
-  request: { agent: "codex"; prompt: string; dashboardPath: string; expectedEpoch: number; runId: string },
+  request: { agent: InstalledAgent["agent"]; prompt: string; dashboardPath: string; expectedEpoch: number; runId: string },
   onEvent: (event: AgentEvent) => void,
 ): Promise<void> {
   const onEventChannel = new Channel<AgentEvent>();

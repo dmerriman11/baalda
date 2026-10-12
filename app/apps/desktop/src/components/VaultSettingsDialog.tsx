@@ -56,6 +56,7 @@ import { formatPrice, perLabel, UpgradeDialog } from "./UpgradeDialog";
 import { useLocalFolderClasses, useLocalVaults } from "./useVaultLists";
 import { visibleFolders } from "../lib/vault/vaultList";
 import { VaultIconSettings } from "./VaultIconSettings";
+import { VaultDashboardsTab } from "./VaultDashboardsTab";
 import { AccountVaultsTab } from "./AccountVaultsTab";
 
 // Defined in `lib/settingsTabs.ts` so the store can name a tab without importing
@@ -122,6 +123,7 @@ const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; icon: React.ReactNo
       </MenuIcon>
     ),
   },
+  { id: "dashboards", label: "Dashboards", icon: <MenuIcon><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></MenuIcon> },
   {
     id: "mcp",
     label: "MCP",
@@ -206,6 +208,8 @@ export function VaultSettingsDialog({
   const [tab, setTabRaw] = useState<SettingsTab>(visibleTab(initialTab ?? "general"));
   /** Bumped when the active nav item is clicked again, so a tab can return to its first page. */
   const [tabReset, setTabReset] = useState(0);
+  const contentRef = useRef<HTMLElement>(null);
+  useEffect(() => { if (contentRef.current) contentRef.current.scrollTop = 0; }, [tab, tabReset]);
   const setTab = (t: SettingsTab) => setTabRaw(visibleTab(t));
 
   // Esc, click-away, focus and the backdrop all live in `SettingsModal`.
@@ -235,7 +239,7 @@ export function VaultSettingsDialog({
     if (showVaults) out.push(...SETTINGS_TABS);
     else out.push(...SETTINGS_TABS.filter((t) => t.id !== "vaults"));
     if (billingEnabled) {
-      const idx = out.findIndex((t) => t.id === "members");
+      const idx = out.findIndex((t) => t.id === "dashboards");
       out.splice(
         idx >= 0 ? idx + 1 : out.length,
         0,
@@ -329,7 +333,7 @@ export function VaultSettingsDialog({
           )}
         </nav>
 
-        <section className="settings-content" aria-label={activeTab.label}>
+        <section ref={contentRef} className="settings-content" aria-label={activeTab.label}>
           {/* Members and access swaps its title for a back link while a profile
               is open. */}
           {!(shown === "members" && !lockedTab) && <h2 className="settings-section-title">{activeTab.label}</h2>}
@@ -341,6 +345,8 @@ export function VaultSettingsDialog({
               activeOrgName={activeOrg?.name ?? null}
               onRequestSignIn={onRequestSignIn}
             />
+          ) : shown === "dashboards" ? (
+            <VaultDashboardsTab onClose={onClose} resetToken={tabReset} />
           ) : shown === "ai" ? (
             <AiSettingsTab onClose={onClose} onGoToGeneral={() => setTab("general")} />
           ) : lockedTab ? (

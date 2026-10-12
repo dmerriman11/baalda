@@ -839,8 +839,8 @@ html[data-platform="windows"] .main-header {
   gap: var(--sp-2);
 }
 html[data-platform="windows"] .sidebar-hidden .main-header {
-  /* Sidebar, search, Home and graph remain above the expanded content. */
-  padding-left: 144px;
+  /* Sidebar, search and graph remain above the expanded content. */
+  padding-left: 114px;
 }
 html[data-platform="windows"] .header-actions {
   border: 0;
@@ -946,6 +946,7 @@ body:has(.sidebar-resizer.dragging) {
 
 /* ---- Sidebar rail (sits on the canvas) ---- */
 .sidebar {
+  --sidebar-toolbar-end: 36px;
   position: relative;
   /* The collapse transform creates a stacking context. Keep that context above
      the later-painted main pane so account/vault popovers can still extend
@@ -1311,7 +1312,7 @@ body:has(.sidebar-resizer.dragging) {
      rows' sync-dot column at ANY sidebar width, 49px in from the tree's right
      edge: row pad 12 + the 22px ⋯ button + 8px gap + half the 14px dot slot.
      The Reveal-in-Finder button above sits on the same column (`.vault-reveal`). */
-  padding: 0 36px var(--sp-1) calc(var(--sp-3) + var(--sp-2));
+  padding: 0 var(--sidebar-toolbar-end) var(--sp-1) calc(var(--sp-3) + var(--sp-2));
   min-height: 24px;
 }
 .filetree-head .section-label {
@@ -2058,6 +2059,15 @@ body:has(.sidebar-resizer.dragging) {
     background var(--t-fast) var(--ease),
     color var(--t-fast) var(--ease);
 }
+.tree-context-menu {
+  -webkit-user-select: none;
+  user-select: none;
+}
+.tree-context-menu li:focus-visible {
+  background: var(--bg-hover);
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
 .context-menu li:hover {
   background: var(--bg-hover);
   color: var(--text-primary);
@@ -2369,6 +2379,8 @@ body:has(.sidebar-resizer.dragging) {
 .context-submenu li.menu-swatches {
   padding: var(--sp-2);
 }
+.context-submenu li.menu-navigation-option { display:flex; align-items:center; justify-content:space-between; gap:12px; text-align:left; }
+.context-submenu .menu-navigation-option .menu-tick { width:auto; }
 .swatch {
   width: 14px;
   height: 14px;
@@ -2733,21 +2745,23 @@ body:has(.sidebar-resizer.dragging) {
    own — no fill, no bottom rule — so it is part of the white note sheet; the
    tabs are pills and the controls float as one pill (`.header-actions`). */
 .main-header {
+  container-type: inline-size;
+  container-name: dashboard-header;
   display: flex;
   align-items: center;
   gap: var(--sp-3);
   /* Same centre line as the traffic lights and the sidebar/search tools; the
      row is taller than the pill, so the pill also clears the window's top. */
   min-height: var(--chrome-row-h);
-  padding: 0 var(--sp-4) 0 calc(var(--sp-3) + 96px);
+  padding: 0 var(--sp-4) 0 calc(var(--sp-3) + 66px);
   background: transparent;
 }
 html[data-platform="macos"] .main-header {
   padding-left: var(--sp-3);
 }
 html[data-platform="macos"] .sidebar-hidden .main-header {
-  /* Traffic lights + sidebar, search and Home stay clear of the first tab. */
-  padding-left: 184px;
+  /* Traffic lights + sidebar and search stay clear of the first tab. */
+  padding-left: 154px;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -4045,6 +4059,9 @@ button.secondary.about-update-btn:disabled {
 .vault-card:hover {
   background: var(--bg-hover);
 }
+.vault-card.current {
+  background: var(--accent-soft);
+}
 .vault-tile {
   overflow: hidden;
   width: 24px;
@@ -4078,16 +4095,6 @@ button.secondary.about-update-btn:disabled {
 .vault-tile.none {
   background: none;
   color: var(--text-secondary);
-}
-/* The open vault gets Slack's ring: a gap, then an outline. */
-.vault-card.current .vault-tile {
-  box-shadow:
-    0 0 0 1.5px var(--bg-surface),
-    0 0 0 3px var(--text-primary);
-}
-/* An uploaded image stays flush: the ring read as a frame drawn on the logo. */
-.vault-card.current .vault-tile.image {
-  box-shadow: none;
 }
 .vault-card-meta {
   flex: 1;

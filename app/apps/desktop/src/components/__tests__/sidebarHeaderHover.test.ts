@@ -100,11 +100,12 @@ describe("vault switcher hover and click", () => {
     expect(menu()).toBeNull();
   });
 
-  it("opens from the name too, without flickering across the header", () => {
+  it("opens only from the icon, with a safe bridge across the name", () => {
     const text = () => host.querySelector<HTMLDivElement>(".sidebar-header-main")!;
     point(text(), "pointerover");
-    expect(menu()).not.toBeNull();
-    // Tile to name: leaving one and entering the other keeps it open.
+    advance(300);
+    expect(menu()).toBeNull();
+    // Leaving the name and entering the icon opens the preview.
     point(text(), "pointerout", "mouse", tile());
     point(tile(), "pointerover", "mouse", text());
     advance(300);
@@ -140,10 +141,12 @@ describe("vault switcher hover and click", () => {
     expect(menu()).toBeNull();
   });
 
-  it("keeps a hover preview up from the name, over the path, into the menu", () => {
+  it("keeps an icon hover preview up over the path and into the menu", () => {
     const name = () => host.querySelector<HTMLDivElement>(".sidebar-header-main")!;
     const line = () => host.querySelector<HTMLDivElement>(".vault-line")!;
-    point(name(), "pointerover");
+    point(tile(), "pointerover");
+    point(tile(), "pointerout", "mouse", name());
+    point(name(), "pointerover", "mouse", tile());
     expect(menu()).not.toBeNull();
     point(name(), "pointerout", "mouse", line());
     point(line(), "pointerover", "mouse", name());
@@ -161,7 +164,9 @@ describe("vault switcher hover and click", () => {
   it("closes a hover preview at once on a path click, so the copied check shows", async () => {
     const name = () => host.querySelector<HTMLDivElement>(".sidebar-header-main")!;
     const line = () => host.querySelector<HTMLDivElement>(".vault-line")!;
-    point(name(), "pointerover");
+    point(tile(), "pointerover");
+    point(tile(), "pointerout", "mouse", name());
+    point(name(), "pointerover", "mouse", tile());
     point(name(), "pointerout", "mouse", line());
     point(line(), "pointerover", "mouse", name());
     expect(menu()).not.toBeNull();

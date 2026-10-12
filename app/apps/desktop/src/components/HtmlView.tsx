@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
-import { useEffect, useRef, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import * as ipc from "../lib/ipc";
 import { useStore } from "../store";
+import { effectiveHomeNote } from "../lib/pins";
 import { effectiveLockForPath, lockScopesByPath } from "../lib/locks";
 import { createDashboardBridge, dashboardUrl, DASHBOARD_PROTOCOL } from "../lib/dashboard/bridge";
 import { dashboardHost, pushDashboardTheme } from "../lib/dashboard/host";
-import { copyDashboardPrompt } from "../lib/dashboard/templates";
-import { DashboardAgentRunner } from "./DashboardAgentRunner";
+import { DashboardHeaderActionsContext } from "./DashboardHeaderActions";
 import { invoke } from "@tauri-apps/api/core";
 import "../styles/dashboard.css";
 
@@ -28,6 +29,9 @@ function snapshotFrame(frame: HTMLIFrameElement | null): Promise<void> {
 
 /** HTML is a synced note. Its scripts run in a separate opaque-origin frame. */
 export function HtmlView({ path }: { path: string }) {
+  const active = useStore((s) => !s.activeVirtualTab && s.openNote?.path === path);
+  const headerActions = useContext(DashboardHeaderActionsContext);
+  const isHome = useStore((s) => effectiveHomeNote(s)?.path === path);
   const vault = useStore((s) => s.vault);
   const titles = useStore((s) => s.titles);
   const locks = useStore((s) => s.locks);
@@ -43,7 +47,6 @@ export function HtmlView({ path }: { path: string }) {
   const [error, setError] = useState<string | null>(null);
   const [revision, setRevision] = useState(0);
   const [lease, setLease] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
   const frame = useRef<HTMLIFrameElement>(null);
   const host = useRef<HTMLDivElement>(null);
   const dirtyRef = useRef(false);
@@ -110,19 +113,19 @@ export function HtmlView({ path }: { path: string }) {
   const url = dashboardUrl(path, vault.epoch, document.documentElement.dataset.platform ?? "other");
   return (
     <div className="html-view dashboard-view" ref={host} tabIndex={-1}>
-      <div className="html-toolbar dashboard-toolbar">
-        <div className="segmented html-tabs">
-          <button type="button" className={mode === "preview" ? "active" : ""} onClick={() => setMode("preview")}>Preview</button>
-          <button type="button" className={mode === "source" ? "active" : ""} onClick={() => setMode("source")}>Source{dirty ? " •" : ""}</button>
-        </div>
-        <span className="dashboard-live-badge" title="Scripts run in an isolated frame">Scripts run</span>
-        <div className="dashboard-toolbar-actions">
-          <button type="button" className="ghost-pill sm" onClick={() => window.dispatchEvent(new CustomEvent("baalda:set-home", { detail: { path, scope: "personal" } }))}>Set as my home</button>
-          <button type="button" className="ghost-pill sm" onClick={() => void copyDashboardPrompt(path, vault.path).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); }).catch((e) => setError(String(e)))}>{copied ? "Prompt copied" : "Ask AI to change this"}</button>
-          {mode === "source" && <button type="button" className="primary sm" disabled={!dirty || readOnly} onClick={() => void save()}>{readOnly ? "View only" : dirty ? "Save" : "Saved"}</button>}
-          {!readOnly && <DashboardAgentRunner path={path} expectedEpoch={vault.epoch} />}
-        </div>
-      </div>
+      {headerActions && active && !isHome && createPortal(<>
+          <details className="dashboard-header-menu" onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.removeAttribute("open"); }}>
+            <summary className="icon-btn" aria-label="Dashboard options" title="Dashboard options" onMouseDown={(event) => event.stopPropagation()}>···</summary>
+            <div className="dashboard-header-menu-items">
+              <button type="button" onClick={(event) => { setMode(mode === "preview" ? "source" : "preview"); event.currentTarget.closest("details")?.removeAttribute("open"); }}>{mode === "preview" ? "View source" : "View dashboard"}</button>
+              {!isHome && <button type="button" onClick={(event) => { window.dispatchEvent(new CustomEvent("baalda:set-home", { detail: { path, scope: "personal" } })); event.currentTarget.closest("details")?.removeAttribute("open"); }}>Set as my home</button>}
+            </div>
+          </details>
+      </>, headerActions)}
+      {mode === "source" && <div className="html-toolbar dashboard-toolbar">
+        <button type="button" className="ghost-pill sm" onClick={() => setMode("preview")}>Back to dashboard</button>
+        <div className="dashboard-toolbar-actions"><button type="button" className="primary sm" disabled={!dirty || readOnly} onClick={() => void save()}>{readOnly ? "View only" : dirty ? "Save" : "Saved"}</button></div>
+      </div>}
       {error && <div className="dashboard-error" role="alert">{error}</div>}
       {mode === "preview" ? content === null || lease === null ? <div className="editor-empty">{error ? "Couldn’t load this dashboard." : "Loading…"}</div> : (
         <iframe ref={frame} key={`${path}:${epoch}:${revision}`} className="html-frame" title={path}

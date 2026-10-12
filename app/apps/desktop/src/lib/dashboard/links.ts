@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-export const REMOTE_DASHBOARD_PREF = "context.dashboard.allowAnyHttps";
 export function linkUrl(value: string): string {
   const url = new URL(value.trim());
   if (url.protocol !== "https:" || url.username || url.password || !url.hostname) throw new Error("Use an HTTPS link without a username or password.");
@@ -26,11 +25,6 @@ export function readDashboardLink(content: string, path: string): string {
     else if (section && /^\s*URL\s*=/i.test(line)) return linkUrl(line.slice(line.indexOf("=") + 1));
   }
   throw new Error("This shortcut has no InternetShortcut URL.");
-}
-export function remoteDashboardAllowed(value: string, allowAny: boolean): boolean {
-  const url = new URL(linkUrl(value));
-  if (allowAny) return true;
-  return ["claude.ai", "claude.site", "chatgpt.com", "openai.com"].some((host) => url.hostname === host || url.hostname.endsWith(`.${host}`));
 }
 /** These app origins currently refuse cross-origin framing. Published sites may allow it. */
 export function knownFrameBlocked(value: string): boolean {

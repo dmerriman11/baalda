@@ -19,6 +19,8 @@ describe("noteLabel", () => {
     expect(noteLabel("Work/Q3 plan.md")).toBe("Q3 plan");
     expect(noteLabel("index.html")).toBe("index");
     expect(noteLabel("legacy.HTM")).toBe("legacy");
+    expect(noteLabel("Dashboards/Home 3.url")).toBe("Home 3");
+    expect(noteLabel("Home.WEBLOC")).toBe("Home");
   });
   it("keeps every other extension — it is how two previews tell apart", () => {
     expect(noteLabel("Papers/spec.pdf")).toBe("spec.pdf");

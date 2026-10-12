@@ -10,6 +10,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
 import { NOT_CREATOR_MESSAGE, canDeleteItem } from "../lib/sync/deletePolicy";
 import {
@@ -38,7 +39,7 @@ import {
   renameInOrder,
 } from "../lib/ordering";
 import { pinModified, sortTree, TREE_SORTS } from "../lib/tree/sort";
-import { pinKey } from "../lib/pins";
+import { homeSidebarVisitKey, pinKey } from "../lib/pins";
 import { requestNewDashboard } from "../lib/homeEvents";
 import { isBlankTreeTarget } from "../lib/tree/blankTarget";
 import { LOCK_TITLES, effectiveLockForPath, lockScopesByPath, type LockScope } from "../lib/locks";
@@ -235,6 +236,7 @@ export function FileTree() {
   const tree = useStore((s) => s.tree);
   const emptyView = useEmptyVaultView();
   const openNote = useStore((s) => s.openNote);
+  const homeHighlighted = useStore((s) => !s.homeSectionHidden && homeSidebarVisitKey(s) !== null);
   const syncEnabled = useStore((s) => s.syncEnabled);
   const syncStatus = useStore((s) => s.syncStatus);
   const locks = useStore((s) => s.locks);
@@ -261,17 +263,21 @@ export function FileTree() {
   // mount, which overwrote the effective value and ignored vault defaults.
   const treeRef = useRef<TreeApi<TreeNode> | null>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
-  // The ⋯ menu's "Sort by" and "Color" rows are one line each; their options
+  // Grouped context-menu rows are one line each; their options
   // open in a fly-out to the right. The fly-out is its OWN fixed layer (the
   // menu scrolls, so anything positioned inside it would be clipped), opened on
   // hover or click and kept open while the pointer crosses the gap into it.
-  const [sub, setSub] = useState<{ kind: "sort" | "color"; rect: DOMRect } | null>(null);
+  type SubmenuKind = "sort" | "color" | "dashboard" | "pin" | "home";
+  const [sub, setSub] = useState<{ kind: SubmenuKind; rect: DOMRect } | null>(null);
   const [subPos, setSubPos] = useState<{ left: number; top: number } | null>(null);
   const subRef = useRef<HTMLUListElement | null>(null);
   const subTimer = useRef<number | undefined>(undefined);
+  const subTrigger = useRef<HTMLElement | null>(null);
+  const focusSub = useRef(false);
   useEffect(() => setSub(null), [menu]);
-  const openSub = (kind: "sort" | "color", row: HTMLElement) => {
+  const openSub = (kind: SubmenuKind, row: HTMLElement) => {
     window.clearTimeout(subTimer.current);
+    subTrigger.current = row;
     setSub({ kind, rect: row.getBoundingClientRect() });
   };
   const keepSub = () => window.clearTimeout(subTimer.current);
@@ -296,10 +302,40 @@ export function FileTree() {
     const top = Math.max(8, Math.min(sub.rect.top - 4, window.innerHeight - 8 - box.height));
     setSubPos({ left, top });
   }, [sub]);
+  useLayoutEffect(() => {
+    if (subPos && focusSub.current && subRef.current) {
+      const first = subRef.current.querySelector<HTMLElement>("li:not(.disabled):not(.menu-heading)");
+      if (first) { first.tabIndex = -1; first.focus(); }
+      focusSub.current = false;
+    }
+  }, [subPos]);
   // Resolved once the menu has been measured; null means "not placed yet", which
   // is also what keeps it invisible for that one frame.
   const menuRef = useRef<HTMLUListElement | null>(null);
+  const menuKeys = (event: ReactKeyboardEvent<HTMLUListElement>, child = false) => {
+    const items = Array.from(event.currentTarget.querySelectorAll<HTMLElement>(":scope > li:not(.disabled):not(.menu-heading)"));
+    const current = (event.target as HTMLElement).closest("li") as HTMLElement | null;
+    const index = current ? items.indexOf(current) : -1;
+    if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+      event.preventDefault(); event.stopPropagation();
+      const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 : event.key === "ArrowDown" ? (index + 1) % items.length : (index < 0 ? items.length - 1 : (index - 1 + items.length) % items.length);
+      if (items[next]) { items[next].tabIndex = -1; items[next].focus(); }
+    } else if (event.key === "Tab") {
+      setMenu(null);
+    } else if (event.key === "Escape" || (child && event.key === "ArrowLeft")) {
+      event.preventDefault(); event.stopPropagation();
+      if (child) { setSub(null); subTrigger.current?.focus(); } else setMenu(null);
+    } else if (current && ["Enter", " ", "ArrowRight"].includes(event.key)) {
+      if (event.key === "ArrowRight" && current.getAttribute("aria-haspopup") !== "menu") return;
+      event.preventDefault(); event.stopPropagation();
+      focusSub.current = current.getAttribute("aria-haspopup") === "menu";
+      current.click();
+    }
+  };
   const [menuPos, setMenuPos] = useState<Placement | null>(null);
+  useLayoutEffect(() => {
+    if (menuPos) menuRef.current?.focus({ preventScroll: true });
+  }, [menuPos]);
   const [shareTarget, setShareTarget] = useState<ShareTarget | null>(null);
   // Which way the fold toggle points: false → "collapse all", true → "expand all".
   // Folders start closed (`openByDefault={false}` on the Tree), so the toggle
@@ -1581,6 +1617,39 @@ export function FileTree() {
     : "";
   // Create/import from this menu would land at a frozen root.
   const menuCreateBlocked = menuDir === "" && rootFrozen;
+  const navigationGroups: ("dashboard" | "pin" | "home")[] = ["dashboard"];
+  if (menu?.node && (menu.node.data.isDir || isNoteExt(menu.node.data.path))) {
+    navigationGroups.push("pin");
+    if (!menu.node.data.isDir) navigationGroups.push("home");
+  }
+  const navigationActions = (kind: "dashboard" | "pin" | "home"): { label: string; run: () => void; checked?: boolean }[] => {
+    if (kind === "dashboard") return [
+      { label: "New dashboard…", run: () => requestNewDashboard() },
+      { label: "Add dashboard link…", run: () => requestNewDashboard("link") },
+    ];
+    if (!menu?.node) return [];
+    const { path, isDir } = menu.node.data;
+    const state = useStore.getState();
+    const docId = state.titles.find((note) => note.path === path)?.id;
+    const orgId = syncEnabled ? session?.activeOrganizationId : null;
+    const appearance = orgId ? state.vaultAppearance[orgId] : undefined;
+    const fail = (error: unknown) => toast(error instanceof Error ? error.message : String(error), "error");
+    if (kind === "pin") {
+      const key = isDir ? pinKey({ kind: "folder", path }) : docId ? pinKey({ kind: "note", docId }) : null;
+      const personal = key && state.personalPins.some((pin) => pinKey(pin) === key);
+      const shared = key && appearance?.pinnedItems?.some((pin) => pinKey(pin) === key);
+      return [
+        { label: "For me", checked: !!personal, run: () => void state.togglePin(path, isDir).catch(fail) },
+        ...(canManage && orgId ? [{ label: "For everyone", checked: !!shared, run: () => void state.togglePin(path, isDir, "vault").catch(fail) }] : []),
+      ];
+    }
+    const personalHome = !!docId && state.personalHomeDocId === docId;
+    const sharedHome = !!docId && appearance?.homeDocId === docId;
+    return [
+      { label: personalHome ? appearance?.homeDocId ? "Use vault Home instead" : "Unset my Home" : "Set as my home", run: () => void state.setHome(personalHome ? null : path, "personal").catch(fail) },
+      ...(canManage && orgId ? [{ label: sharedHome ? "Unset vault Home for everyone" : "Set as vault home", run: () => void state.setHome(sharedHome ? null : path, "vault").catch(fail) }] : []),
+    ];
+  };
 
   // The legacy lock applied DIRECTLY to the menu's node (not inherited), so the
   // menu can offer Unlock with the right share id. There is no Lock entry: new
@@ -1609,7 +1678,8 @@ export function FileTree() {
   // container), so a fresh object literal here re-rendered all 6,000 of them on
   // every FileTree render — and FileTree renders on every note open, because it
   // subscribes to `openNote`. Memoized on the row-visible values only.
-  const selectedPath = openNote?.path ?? null;
+  // The visible Home shortcut owns the active highlight for its page.
+  const selectedPath = homeHighlighted ? null : openNote?.path ?? null;
   const dragPath = drag?.path ?? null;
   const rowShared = useMemo<RowShared>(
     () => ({
@@ -1911,8 +1981,10 @@ export function FileTree() {
 
       {menu && (
         <ul
-          className="context-menu"
+          className="context-menu tree-context-menu"
           ref={menuRef}
+          role="menu" tabIndex={-1}
+          onKeyDown={(event) => menuKeys(event)}
           style={
             menuPos
               ? {
@@ -1925,26 +1997,17 @@ export function FileTree() {
                 { left: menu.x, top: menu.y, visibility: "hidden" }
           }
         >
-          <li onClick={() => requestNewDashboard()}>New dashboard…</li>
-          <li onClick={() => requestNewDashboard("link")}>Add dashboard link…</li>
-          {menu.node && (menu.node.data.isDir || isNoteExt(menu.node.data.path)) && (() => {
-            const path = menu.node!.data.path;
-            const isDir = menu.node!.data.isDir;
-            const state = useStore.getState();
-            const docId = state.titles.find((t) => t.path === path)?.id;
-            const key = isDir ? pinKey({ kind: "folder", path }) : docId ? pinKey({ kind: "note", docId }) : null;
-            const orgId = syncEnabled ? session?.activeOrganizationId : null;
-            const appearance = orgId ? state.vaultAppearance[orgId] : undefined;
-            const personal = key && state.personalPins.some((p) => pinKey(p) === key);
-            const shared = key && appearance?.pinnedItems?.some((p) => pinKey(p) === key);
-            const fail = (e: unknown) => toast(e instanceof Error ? e.message : String(e), "error");
-            return <>
-              <li className="menu-sep-item" onClick={() => void state.togglePin(path, isDir).catch(fail)}>{personal ? "Unpin" : "Pin"}</li>
-              {canManage && orgId && <li onClick={() => void state.togglePin(path, isDir, "vault").catch(fail)}>{shared ? "Unpin for everyone" : "Pin for everyone"}</li>}
-              {!isDir && <li onClick={() => void state.setHome(path).catch(fail)}>Set as my home</li>}
-              {!isDir && canManage && orgId && <li onClick={() => void state.setHome(path, "vault").catch(fail)}>Set as vault home</li>}
-            </>;
-          })()}
+          {navigationGroups.map((kind) => (
+            <li key={kind} role="menuitem" tabIndex={0}
+              className={`menu-sub-row${sub?.kind === kind ? " open" : ""}`}
+              aria-haspopup="menu" aria-expanded={sub?.kind === kind}
+              onMouseEnter={(event) => openSub(kind, event.currentTarget)}
+              onMouseLeave={closeSubSoon}
+              onClick={(event) => { event.stopPropagation(); openSub(kind, event.currentTarget); }}>
+              <span className="menu-sub-label">{kind === "dashboard" ? "Dashboard" : kind === "pin" ? "Pin" : "Home"}</span>
+              <span className="menu-sub-chevron" aria-hidden="true">›</span>
+            </li>
+          ))}
           {/* Creating at a frozen root is refused; the items stay clickable so
               the refusal toast can say why, but they read as unavailable. */}
           <li
@@ -2122,15 +2185,26 @@ export function FileTree() {
 
       {menu && sub && (
         <ul
-          className="context-menu context-submenu"
+          className="context-menu context-submenu tree-context-menu"
           ref={subRef}
           role="menu"
+          onKeyDown={(event) => menuKeys(event, true)}
           style={subPos ? { left: subPos.left, top: subPos.top } : { visibility: "hidden", left: 0, top: 0 }}
           onMouseEnter={keepSub}
           onMouseLeave={closeSubSoon}
           onClick={(e) => e.stopPropagation()}
         >
-          {sub.kind === "sort" ? (
+          {sub.kind === "dashboard" || sub.kind === "pin" || sub.kind === "home" ? (
+            navigationActions(sub.kind).map((action) => <li key={action.label}
+              role={action.checked === undefined ? "menuitem" : "menuitemcheckbox"}
+              aria-checked={action.checked}
+              className={`menu-navigation-option${action.checked ? " is-on" : ""}`}
+              tabIndex={0}
+              onClick={() => { action.run(); setMenu(null); }}>
+              <span>{action.label}</span>
+              {action.checked && <span className="menu-tick" aria-hidden="true">✓</span>}
+            </li>)
+          ) : sub.kind === "sort" ? (
             <>
               {menuDir !== "" && (
                 <li

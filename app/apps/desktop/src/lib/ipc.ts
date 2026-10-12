@@ -3,7 +3,7 @@
 // `@tauri-apps/api` directly. This keeps later phases (a Yjs sync layer) able to
 // swap the transport without hunting invoke() calls across components.
 
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, Channel } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { openPath, openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { decodeStateVectors, decodeYjsState, frame, type YjsState } from "./ipcCodec";
@@ -15,6 +15,15 @@ export type { YjsState } from "./ipcCodec";
 
 /** Open an external URL (markdown links) in the user's default browser. */
 export const openExternal = (url: string) => openUrl(url);
+/** Native, unprivileged viewer positioned inside the current dashboard tab. */
+export interface DashboardLinkBounds { x: number; y: number; width: number; height: number }
+export const mountDashboardLink = (url: string, bounds: DashboardLinkBounds, onLoaded: () => void): Promise<string> => {
+  const onLoad = new Channel<null>();
+  onLoad.onmessage = onLoaded;
+  return invoke("mount_dashboard_link", { url, bounds, onLoad });
+};
+export const updateDashboardLink = (label: string, bounds: DashboardLinkBounds, visible: boolean): Promise<void> => invoke("update_dashboard_link", { label, bounds, visible });
+export const unmountDashboardLink = (label: string): Promise<void> => invoke("unmount_dashboard_link", { label });
 
 /**
  * Show a vault folder in the OS file manager (Finder / Explorer / xdg).

@@ -23,7 +23,6 @@ import {
   PROFILE_IMAGE_PX,
 } from "../lib/profileAvatar";
 import { imageFileToSquareDataUrl } from "../lib/squareImage";
-import { RemoteDashboardSettings } from "./RemoteDashboardView";
 import { InstalledAgentsStatus } from "./DashboardAgentRunner";
 import { AccountPlanTab } from "./AccountPlanTab";
 import { AccountVaultsTab } from "./AccountVaultsTab";
@@ -518,6 +517,7 @@ function StatusTab() {
 }
 
 function AppearanceTab() {
+  const homeSectionHidden = useStore((s) => s.homeSectionHidden);
   const overrides = useStore((s) => s.appearanceOverrides);
   const vaultAppearance = useStore((s) => s.vaultAppearance);
   const orgId = useStore((s) =>
@@ -547,6 +547,14 @@ function AppearanceTab() {
     else st.setAppearanceOverride(key, value);
   };
   return (
+    <>
+    <label className="menu-row toggle-row">
+      <span className="menu-row-label">Show Home section
+        <span className="field-hint">Keep Home in the sidebar on this device.</span>
+      </span>
+      <Switch checked={!homeSectionHidden} ariaLabel="Show Home section"
+        onChange={(show) => useStore.getState().setHomeSectionHidden(!show)} />
+    </label>
     <AppearanceRows
       mode="personal"
       values={values}
@@ -571,6 +579,7 @@ function AppearanceTab() {
         return null;
       }}
     />
+    </>
   );
 }
 
@@ -758,7 +767,6 @@ function AboutTab({ onClose }: { onClose: () => void }) {
       </div>
 
       <InstalledAgentsStatus />
-      <RemoteDashboardSettings />
 
       <div className="menu-sep" />
       <button

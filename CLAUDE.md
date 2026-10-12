@@ -143,7 +143,7 @@ Errors: single `AppError(String)` (`error.rs`).
   synced reads require a fresh server-readable listing. **Baalda renders; it never generates.**
   Home/personal pins are device-local, shared Home/pins use `vault_appearance`; appearance PATCH
   and atomic pin toggles preserve concurrent fields. Installed Codex runs under a dedicated named
-  permission profile; Claude is copy-prompt only. See `docs/DASHBOARDS.md` for API and boundaries.
+  permission profile; installed Claude uses restricted headless file tools with private-path denials, no shell or MCP tools, and saved CLI authentication. See `docs/DASHBOARDS.md` for API and boundaries.
 - `notefile.rs` — **atomic writes** (temp + rename), `sha256_hex`.
 - `parse.rs` — `parse_note` → title / tags / `[[wikilinks]]` / frontmatter. `derive_title`
   (frontmatter `title:` → first H1 → stem) is the **index/search/wikilink** title — `index.rs`
@@ -957,3 +957,9 @@ session advisory lock (`billing/note-quota.ts`). Existing notes remain adoptable
 at/above the cap; no data is deleted. `note_limit_reached` prompts an upgrade but
 does not stop reconciliation of existing notes. Self-hosters and
 active paid subscriptions bypass this note cap.
+
+Linked Claude/ChatGPT dashboard tabs use `dashboard_remote.rs` native child webviews
+(Tauri `unstable` multi-webview API). These HTTPS viewers have no remote IPC
+capabilities or vault bridge. Main-app commands requiring a caller must use the
+main `Webview` identity, since a multi-view window is no longer a `WebviewWindow`.
+React owns viewer bounds and lifetime; native viewers are hidden beneath app overlays.

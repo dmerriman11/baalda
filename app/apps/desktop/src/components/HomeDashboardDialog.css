@@ -85,6 +85,9 @@
   gap: 8px;
   align-items: center;
 }
+.dashboard-template-meta { display:flex; align-items:center; justify-content:space-between; gap:8px; font-size:10px; font-weight:600; color:var(--text-secondary); }
+.dashboard-template-palette { display:flex; gap:3px; }
+.dashboard-template-palette i { width:10px; height:10px; border-radius:50%; border:1px solid rgb(0 0 0 / 8%); }
 .dashboard-template-title strong {
   font-size: 13px;
   line-height: 1.4;

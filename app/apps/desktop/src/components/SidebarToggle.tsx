@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { HomeButton } from "./HomeNavigation";
 import { GraphButton } from "./GraphButton";
 
 /** Window-chrome control for showing and hiding the vault sidebar. */
@@ -62,7 +61,6 @@ export function SidebarToggle({
           <path d="m20 20-3.5-3.5" />
         </svg>
       </button>
-      <HomeButton />
       {onGraph && <GraphButton titlebar onClick={onGraph} />}
     </div>
   );

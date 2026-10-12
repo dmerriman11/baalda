@@ -27,7 +27,7 @@ const UNSAFE = UNSAFE_STEM;
 export const MAX_STEM = 100;
 
 /** The extensions a note-shaped file hides in the UI. */
-const NOTE_EXT = /\.(md|html?)$/i;
+const NOTE_EXT = /\.(md|html?|url|webloc)$/i;
 
 /**
  * Does this path open in the CodeMirror note editor — i.e. does it ride the

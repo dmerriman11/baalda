@@ -69,4 +69,10 @@ describe("SidebarToggle", () => {
     act(() => host.querySelector<HTMLButtonElement>(".graph-btn")!.click());
     expect(onGraph).toHaveBeenCalledOnce();
   });
+  it.each([true, false])("does not render a top Home control with sidebar hidden=%s", (hidden) => {
+    act(() => root.render(createElement(SidebarToggle, { hidden, onToggle: vi.fn(), searchOpen: false, onSearch: vi.fn() })));
+    expect(host.querySelector(".home-button")).toBeNull();
+    expect(host.querySelector(".titlebar-home")).toBeNull();
+    expect(host.querySelectorAll(".titlebar-tool")).toHaveLength(2);
+  });
 });

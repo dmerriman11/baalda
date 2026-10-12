@@ -149,7 +149,7 @@ pub async fn google_oauth_await(state: State<'_, AppState>) -> AppResult<String>
 /// sign-in into an authentication error.
 #[tauri::command]
 pub fn google_oauth_return_to_app(app: tauri::AppHandle) {
-    let Some(window) = app.get_webview_window("main") else {
+    let Some(window) = app.get_window("main") else {
         log::warn!("[oauth] sign-in completed but the main window was unavailable");
         return;
     };

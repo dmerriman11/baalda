@@ -44,6 +44,37 @@ export function renamePinnedFolders(items: readonly PinnedItem[], from: string, 
 export function resolveHome(personal: string | null, shared: string | null | undefined): string | null {
   return personal ?? shared ?? null;
 }
+/** The same effective Home identity drives navigation and dashboard actions. */
+export function effectiveHomeNote(state: {
+  personalHomeDocId: string | null;
+  syncEnabled: boolean;
+  session: { activeOrganizationId?: string | null } | null;
+  vaultAppearance: Record<string, { homeDocId?: string | null }>;
+  titles: readonly { id: string; path: string }[];
+}) {
+  const orgId = state.syncEnabled ? state.session?.activeOrganizationId : null;
+  const homeId = resolveHome(state.personalHomeDocId, orgId ? state.vaultAppearance[orgId]?.homeDocId : null);
+  return state.titles.find((note) => note.id === homeId);
+}
+/** Only today's effective Home owns the temporary full-width layout. */
+export function homeSidebarVisitKey(state: Parameters<typeof effectiveHomeNote>[0] & {
+  vault: { path: string } | null;
+  openNote: { path: string } | null;
+  activeVirtualTab: string | null;
+  homeActivation: { vaultPath: string; path: string; revision: number } | null;
+}): string | null {
+  const home = effectiveHomeNote(state);
+  if (!state.vault || !home || state.activeVirtualTab || state.openNote?.path !== home.path) return null;
+  const activation = state.homeActivation;
+  if (activation?.vaultPath !== state.vault.path || activation.path !== home.path) return null;
+  return `${state.vault.path}/${home.id}/${home.path}:${activation.revision}`;
+}
+/** Repeated Home activation toggles only its current visit, never the saved preference. */
+export function nextHomeSidebarShown(shown: string | null, previousVisit: string | null, nextVisit: string | null, toggle: boolean): string | null {
+  const sameHome = previousVisit && nextVisit &&
+    previousVisit.slice(0, previousVisit.lastIndexOf(":")) === nextVisit.slice(0, nextVisit.lastIndexOf(":"));
+  return toggle && sameHome && shown !== previousVisit ? nextVisit : null;
+}
 export function isDashboard(path: string): boolean {
   return /\.(html?|url|webloc)$/i.test(path);
 }

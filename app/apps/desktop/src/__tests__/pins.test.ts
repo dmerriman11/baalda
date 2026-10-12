@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from "vitest";
-import { mergePins, visiblePinnedItems, parsePins, renamePinnedFolders, resolveHome, togglePinned, isDashboard, type PinnedItem } from "../lib/pins";
+import { mergePins, visiblePinnedItems, parsePins, renamePinnedFolders, resolveHome, effectiveHomeNote, homeSidebarVisitKey, nextHomeSidebarShown, togglePinned, isDashboard, type PinnedItem } from "../lib/pins";
 import { parseVaultAppearanceSettings } from "../lib/appearanceSettings";
 
 describe("personal and vault navigation", () => {
@@ -37,6 +37,45 @@ describe("personal and vault navigation", () => {
     expect(resolveHome("mine", "vault")).toBe("mine");
     expect(resolveHome(null, "vault")).toBe("vault");
     expect(resolveHome(null, undefined)).toBeNull();
+  });
+  it("identifies personal and inherited Home dashboards while respecting overrides and sync", () => {
+    const personal = { id: "mine", path: "My home.html" };
+    const shared = { id: "shared", path: "Team home.url" };
+    const state = { personalHomeDocId: null as string | null, syncEnabled: true,
+      session: { activeOrganizationId: "org" }, vaultAppearance: { org: { homeDocId: "shared" } },
+      titles: [personal, shared] };
+    expect(effectiveHomeNote(state)).toEqual(shared);
+    expect(effectiveHomeNote({ ...state, personalHomeDocId: "mine" })).toEqual(personal);
+    expect(effectiveHomeNote({ ...state, syncEnabled: false })).toBeUndefined();
+    expect(effectiveHomeNote({ ...state, personalHomeDocId: "missing" })).toBeUndefined();
+  });
+  it("toggles a repeated Home activation and collapses a fresh or different Home visit", () => {
+    const first = "/vault/home/Home.html:1";
+    const second = "/vault/home/Home.html:2";
+    const third = "/vault/home/Home.html:3";
+    expect(nextHomeSidebarShown(null, first, second, true)).toBe(second);
+    expect(nextHomeSidebarShown(second, second, third, true)).toBeNull();
+    expect(nextHomeSidebarShown(null, null, first, true)).toBeNull();
+    expect(nextHomeSidebarShown(second, second, third, false)).toBeNull();
+    expect(nextHomeSidebarShown(null, first, "/vault/other/Other.html:2", true)).toBeNull();
+    expect(nextHomeSidebarShown(second, second, null, true)).toBeNull();
+  });
+  it.each(["Former.html", "Former.md"])("immediately releases the former Home layout for %s", (path) => {
+    const state = { personalHomeDocId: "former" as string | null, syncEnabled: true,
+      session: { activeOrganizationId: "org" }, vaultAppearance: { org: { homeDocId: "shared" } },
+      titles: [{ id: "former", path }, { id: "shared", path: "New.html" }],
+      vault: { path: "/vault" }, openNote: { path }, activeVirtualTab: null,
+      homeActivation: { vaultPath: "/vault", path, revision: 7 } };
+    expect(homeSidebarVisitKey(state)).not.toBeNull();
+    expect(homeSidebarVisitKey({ ...state, personalHomeDocId: "shared" })).toBeNull();
+    // Clearing the personal override activates shared Home, not stale history.
+    expect(homeSidebarVisitKey({ ...state, personalHomeDocId: null })).toBeNull();
+    const inherited = { ...state, personalHomeDocId: null, openNote: { path: "New.html" } };
+    const firstVisit = homeSidebarVisitKey(inherited);
+    expect(firstVisit).toBeNull();
+    expect(homeSidebarVisitKey({ ...state, homeActivation: null })).toBeNull();
+    expect(homeSidebarVisitKey({ ...inherited, homeActivation: { vaultPath: "/vault", path: "New.html", revision: 8 } })).not.toBe(firstVisit);
+    expect(homeSidebarVisitKey({ ...inherited, activeVirtualTab: "review" })).toBeNull();
   });
   it("rejects unsafe pins without dropping valid stable references", () => {
     expect(parsePins([note, { kind: "folder", path: "../secret" }, { kind: "folder", path: ".context" }, { kind: "folder", path: "/tmp" }, { kind: "note", docId: "bad/id" }])).toEqual([note]);

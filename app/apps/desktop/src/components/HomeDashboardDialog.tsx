@@ -9,7 +9,11 @@ import {
 } from "../lib/dashboard/templates";
 import { dashboardPath } from "../lib/dashboard/bridge";
 import { internetShortcut } from "../lib/dashboard/links";
+import { detectInstalledAgents, type InstalledAgent } from "../lib/dashboard/agent";
+import { requestDashboardAgent } from "../lib/dashboard/agentLaunch";
 import "./HomeDashboardDialog.css";
+import { VaultDashboardsTab } from "./VaultDashboardsTab";
+import { DashboardTemplateGallery, templateHtml } from "./DashboardTemplateGallery";
 
 function existingPaths(): Set<string> {
   const state = useStore.getState();
@@ -20,6 +24,10 @@ function existingPaths(): Set<string> {
   };
   if (state.tree) collect(state.tree);
   return paths;
+}
+
+function defaultDashboardFolder(): string {
+  return useStore.getState().tree?.children?.find((node) => node.isDir && node.path.toLowerCase() === "dashboards")?.path ?? "Dashboards";
 }
 
 function availableName(
@@ -209,8 +217,10 @@ export function HomeDashboardDialog() {
   const vault = useStore((s) => s.vault);
   const tree = useStore((s) => s.tree);
   const titles = useStore((s) => s.titles);
+  const [manage, setManage] = useState(false);
+  const [configuring, setConfiguring] = useState(false);
   const [kind, setKind] = useState<"html" | "link" | null>(null);
-  const [templateId, setTemplateId] = useState<string>("daily");
+  const [templateId, setTemplateId] = useState<string>(DASHBOARD_TEMPLATES[0].id);
   const [name, setName] = useState("Home");
   const [nameCustomized, setNameCustomized] = useState(false);
   const [folder, setFolder] = useState("");
@@ -218,6 +228,8 @@ export function HomeDashboardDialog() {
   const [error, setError] = useState<string | null>(null);
   const [nameError, setNameError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [agents, setAgents] = useState<InstalledAgent[] | null>(null);
+  const [setAsHome, setSetAsHome] = useState(false);
   const [created, setCreated] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const epoch = useRef<number | null>(null);
@@ -239,10 +251,14 @@ export function HomeDashboardDialog() {
       const nextKind =
         (event as CustomEvent).detail?.kind === "link" ? "link" : "html";
       setKind(nextKind);
-      setTemplateId("daily");
-      setName(availableName("Home", "", nextKind));
+      setConfiguring(!!(event as CustomEvent).detail?.templateId || nextKind === "link");
+      setManage((event as CustomEvent).detail?.manage === true);
+      setSetAsHome((event as CustomEvent).detail?.setAsHome === true);
+      setTemplateId(DASHBOARD_TEMPLATES.find((t) => t.id === (event as CustomEvent).detail?.templateId)?.id ?? DASHBOARD_TEMPLATES[0].id);
+      const destination = defaultDashboardFolder();
+      setName(availableName("Home", destination, nextKind));
       setNameCustomized(false);
-      setFolder("");
+      setFolder(destination);
       setUrl("");
       setError(null);
       setNameError(null);
@@ -254,8 +270,16 @@ export function HomeDashboardDialog() {
     return () => window.removeEventListener("baalda:new-dashboard", open);
   }, []);
   useEffect(() => {
-    if (kind) nameInput.current?.focus();
+    if (!kind) return;
+    let cancelled = false;
+    void detectInstalledAgents().then((installed) => {
+      if (!cancelled) setAgents(installed.filter((agent) => agent.runnable));
+    }).catch(() => { if (!cancelled) setAgents([]); });
+    return () => { cancelled = true; };
   }, [kind]);
+  useEffect(() => {
+    if (kind && configuring) nameInput.current?.focus();
+  }, [kind, configuring]);
   useEffect(() => {
     if (kind && !created && !nameCustomized) {
       setName(
@@ -285,7 +309,7 @@ export function HomeDashboardDialog() {
       if (previousFocus.current?.isConnected) previousFocus.current.focus();
     }
   };
-  const folderSet = new Set<string>([""]);
+  const folderSet = new Set<string>(["", defaultDashboardFolder()]);
   const walk = (node: ipc.TreeNode) => {
     if (node.isDir && node.path) folderSet.add(node.path);
     node.children?.forEach(walk);
@@ -338,37 +362,58 @@ export function HomeDashboardDialog() {
       nameInput.current?.focus();
       return;
     }
-    if (existingPaths().has(path.toLowerCase())) {
+    if (!created && existingPaths().has(path.toLowerCase())) {
       setNameError(
         "A file with this name already exists in this folder. Choose another name.",
       );
       nameInput.current?.focus();
       return;
     }
+    path = created ?? path;
     busyRef.current = true;
     setBusy(true);
     try {
-      if (!folder && useStore.getState().rootFrozen)
-        throw new Error("This vault’s root is frozen. Choose a folder.");
-      const content = kind === "link" ? internetShortcut(url) : selected.html;
-      const wasCreated = await ipc.writeNoteIfMissing(
-        path,
-        content,
-        vault.epoch,
-      );
-      if (!current()) return;
-      if (!wasCreated) {
-        setNameError(
-          "A file with this name already exists in this folder. Choose another name.",
+      if (!created) {
+        if (!folder && useStore.getState().rootFrozen)
+          throw new Error("This vault’s root is frozen. Choose a folder.");
+        const content = kind === "link" ? internetShortcut(url) : await templateHtml(selected);
+        if (!current()) return;
+        if (folder.toLowerCase() === "dashboards") {
+          if (useStore.getState().rootFrozen && !useStore.getState().tree?.children?.some((node) => node.isDir && node.path.toLowerCase() === folder.toLowerCase()))
+            throw new Error("This vault’s root is frozen. Choose an existing folder.");
+          if (!current()) return;
+          await ipc.ensureFolder(folder, requestEpoch);
+          if (!current()) return;
+        }
+        const wasCreated = await ipc.writeNoteIfMissing(
+          path,
+          content,
+          vault.epoch,
         );
-        nameInput.current?.focus();
-        return;
+        if (!current()) return;
+        if (!wasCreated) {
+          setNameError(
+            "A file with this name already exists in this folder. Choose another name.",
+          );
+          nameInput.current?.focus();
+          return;
+        }
+        setCreated(path);
       }
       await useStore.getState().refreshTree();
+      if (!current()) return;
       await useStore.getState().refreshTitles();
       if (!current()) return;
-      await useStore.getState().openNoteByPath(path);
-      if (current()) setCreated(path);
+      if (setAsHome) {
+        await useStore.getState().setHome(path, "personal");
+        if (!current()) return;
+        await useStore.getState().openNoteByPath(path);
+        if (!current()) return;
+        setKind(null);
+      } else {
+        await useStore.getState().openNoteByPath(path);
+        if (current() && kind === "link") setKind(null);
+      }
     } catch (e) {
       if (current()) setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -388,7 +433,7 @@ export function HomeDashboardDialog() {
     >
       <div
         ref={dialog}
-        className="dashboard-dialog"
+        className={`dashboard-dialog${kind === "html" && !created && !configuring ? " dashboard-gallery-dialog" : ""}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby="new-dashboard-title"
@@ -433,7 +478,7 @@ export function HomeDashboardDialog() {
               ? "Your dashboard is ready"
               : kind === "link"
                 ? "Add dashboard from link"
-                : "New dashboard"}
+                : manage ? "Home & dashboards" : configuring ? `Set up ${selected.name}` : "New dashboard"}
           </h2>
           <button
             type="button"
@@ -454,7 +499,18 @@ export function HomeDashboardDialog() {
             </svg>
           </button>
         </div>
-        {created ? (
+        {manage ? <VaultDashboardsTab onClose={close} onNew={(id) => { if (id) setTemplateId(id); setManage(false); setConfiguring(true); }} /> : created && setAsHome ? (
+          <>
+            <p className="dashboard-dialog-description">
+              {busy ? "Setting up your Home…" : `${created} was created. Finish setting it as your Home.`}
+            </p>
+            <div className="dashboard-dialog-footer">
+              <button type="button" className="primary" disabled={busy} onClick={() => void create()}>
+                {busy ? "Setting Home…" : "Retry setting Home"}
+              </button>
+            </div>
+          </>
+        ) : created ? (
           <>
             <p className="dashboard-dialog-description">
               <strong>{created}</strong> is an ordinary file in your vault.{" "}
@@ -463,10 +519,23 @@ export function HomeDashboardDialog() {
                 : "Share and pin it like any note. Some sites open in your browser."}
             </p>
             <div className="dashboard-dialog-footer">
-              {kind === "html" && (
+              {agents?.map((agent) => (
+                <button key={agent.agent} type="button" className="secondary" disabled={busy}
+                  onClick={() => {
+                    const expectedEpoch = epoch.current;
+                    if (expectedEpoch == null || useStore.getState().vault?.epoch !== expectedEpoch) return;
+                    ++generation.current;
+                    setKind(null);
+                    requestDashboardAgent({ agent: agent.agent, path: created, expectedEpoch });
+                  }}>
+                  Update with {agent.agent === "claude" ? "Claude" : "Codex"}
+                </button>
+              ))}
+              {agents?.length === 0 && kind === "html" && (
                 <button
                   type="button"
                   className="secondary"
+                  disabled={busy}
                   onClick={() =>
                     void copyDashboardPrompt(
                       created,
@@ -483,6 +552,7 @@ export function HomeDashboardDialog() {
               <button
                 type="button"
                 className="secondary"
+                disabled={busy}
                 onClick={() =>
                   void useStore
                     .getState()
@@ -493,7 +563,7 @@ export function HomeDashboardDialog() {
               >
                 Set as my home
               </button>
-              <button type="button" className="primary" onClick={close}>
+              <button type="button" className="primary" disabled={busy} onClick={close}>
                 Done
               </button>
             </div>
@@ -502,42 +572,13 @@ export function HomeDashboardDialog() {
           <>
             <p className="dashboard-dialog-description">
               {kind === "html"
-                ? "Start with a template, then ask your agent to make it yours using your notes."
+                ? configuring ? "Give your dashboard a name and choose where to save it." : "Choose an original dashboard design. Preview it, then let Claude or Codex connect it to your vault."
                 : "Save a link to a dashboard or artifact in your vault."}
             </p>
-            {kind === "html" && (
-              <div className="dashboard-template-section">
-                <span className="dashboard-field-label">Start with</span>
-                <div
-                  className="dashboard-templates"
-                  role="group"
-                  aria-label="Dashboard template"
-                >
-                  {DASHBOARD_TEMPLATES.map((template) => (
-                    <button
-                      type="button"
-                      key={template.id}
-                      className="dashboard-template"
-                      aria-pressed={templateId === template.id}
-                      disabled={busy}
-                      onClick={() => setTemplateId(template.id)}
-                    >
-                      <span className="dashboard-template-title">
-                        <strong>{template.name}</strong>
-                        <span
-                          className="dashboard-template-check"
-                          aria-hidden="true"
-                        >
-                          {templateId === template.id ? "✓" : ""}
-                        </span>
-                      </span>
-                      <small>{template.description}</small>
-                    </button>
-                  ))}
-                </div>
-              </div>
+            {kind === "html" && !configuring && (
+              <DashboardTemplateGallery selectedId={templateId} disabled={busy} onUse={(template) => { setTemplateId(template.id); setConfiguring(true); }} />
             )}
-            <div className="dashboard-file-fields">
+            {configuring && <div className="dashboard-file-fields">
               <div className="dashboard-field">
                 <label htmlFor={`${fieldId}-name`}>File name</label>
                 <div
@@ -586,6 +627,7 @@ export function HomeDashboardDialog() {
                 />
               </div>
             </div>
+            }
             {kind === "link" && (
               <div className="dashboard-field dashboard-url-field">
                 <label htmlFor={`${fieldId}-url`}>Dashboard URL</label>
@@ -614,7 +656,7 @@ export function HomeDashboardDialog() {
               >
                 Cancel
               </button>
-              <button
+              {configuring && <button
                 type="button"
                 className="primary"
                 disabled={
@@ -622,8 +664,8 @@ export function HomeDashboardDialog() {
                 }
                 onClick={() => void create()}
               >
-                {busy ? "Creating…" : "Create dashboard"}
-              </button>
+                {busy ? "Adding…" : setAsHome ? "Set as Home" : "Add to vault"}
+              </button>}
             </div>
           </>
         )}

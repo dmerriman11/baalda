@@ -349,7 +349,7 @@ export function SyncBadge({
       ) : (
         <span className="sync-dot" aria-hidden="true" />
       )}
-      {label}
+      <span className="sync-badge-label">{label}</span>
     </>
   );
   const hold = syncBadgeHold({ rootMissing, enabled, pause, now: Date.now() });
@@ -357,7 +357,7 @@ export function SyncBadge({
     return (
       <span className={`sync-badge ${hold.tone}`} title={hold.title}>
         <span className="sync-dot" aria-hidden="true" />
-        {hold.label}
+        <span className="sync-badge-label">{hold.label}</span>
       </span>
     );
   }

@@ -144,14 +144,12 @@ export function SidebarHeader() {
           <VaultTile identity={tileIdentity} name={name} />
         </button>
         <div className="sidebar-header-text">
-          {/* The name and chevron hover-open the switcher too, so sweeping
-              across the header never flickers it. Not the wrapper above: the
-              popover lives inside it, and a move from the menu back up to the
-              name would then never count as re-entering. */}
+          {/* Only the icon opens a hover preview. The name is a safe bridge to
+              an already-open menu, and clicking still pins the switcher. */}
           <div
             className="sidebar-header-main"
             ref={mainRef}
-            onPointerEnter={hoverEnter}
+            onPointerEnter={cancelHoverClose}
             onPointerLeave={scheduleHoverClose}
           >
             <button

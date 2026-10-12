@@ -383,6 +383,17 @@ export function writeLineNumbers(on: boolean): void {
 
 const SIDEBAR_WIDTH_KEY = "context.sidebarWidth";
 const SIDEBAR_HIDDEN_KEY = "context.sidebarHidden";
+const HOME_SECTION_HIDDEN_KEY = "context.homeSectionHidden";
+
+export function readHomeSectionHidden(): boolean {
+  try { return localStorage.getItem(HOME_SECTION_HIDDEN_KEY) === "true"; }
+  catch { return false; }
+}
+
+export function writeHomeSectionHidden(hidden: boolean): void {
+  try { localStorage.setItem(HOME_SECTION_HIDDEN_KEY, String(hidden)); }
+  catch { /* Keep the preference in memory when storage is unavailable. */ }
+}
 
 /** The width the sidebar starts at, and what a double-click on the divider
  *  restores. */

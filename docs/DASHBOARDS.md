@@ -5,30 +5,65 @@ note in your vault. You or your agent author the page; Baalda displays it, watch
 for edits, and synchronizes it through the existing note access model. Markdown
 notes remain the source material. There is no exported dashboard database.
 
+When no Home is set, the sidebar's **Set a home** template flow creates the file,
+assigns it as your personal Home, and opens it with the sidebar visible. The
+sidebar Home action can then enter the full-width view explicitly. Ordinary **New
+dashboard** creation keeps Home assignment optional. Its completion screen offers
+installed Claude/Codex actions; copying an agent prompt is the fallback when
+neither provider is available. If Home setup fails after the file was created,
+retry finishes setup without creating or overwriting the file again.
+
 ## Getting started
 
-Right-click Home (or press Shift+F10 while it has keyboard focus) to open the
-dashboard chooser and create a dashboard. Choose Daily home, Project tracker,
+Use the sidebar Home row's options to change Home, or choose Set a home to open
+the template dialog when no Home is available. Choose Daily home, Project tracker,
 Reading list, Team pulse, CRM-lite, or Blank, then a name and folder. These are
 static examples, with an editing guide in their HTML comment. Creation only
 happens after you click Create; existing files are never overwritten.
 
-Open Preview to interact with the page or Source to edit its HTML. Copy agent
-prompt includes the file path and optional bridge reference. Paste it into your
-preferred agent, use Baalda's MCP tools, or let an agent edit the file on disk.
+HTML dashboards open directly as pages, without a second Preview/Source toolbar.
+Update with Claude and Update with Codex appear beside the main navigation's
+app actions only while the current effective Home is open, including Markdown,
+HTML and linked Home notes (shortened to provider names in narrow windows).
+Other HTML pages offer Dashboard options (`···`) with View source and Set as my
+home; Home itself has no overflow menu. Source mode
+keeps Save and Back to dashboard controls. You can also use Baalda's MCP tools
+or let an agent edit the file on disk.
 The watcher reloads the open preview after the file changes. Pages using the SDK
 restore scroll and can retain widget state on this device.
 
 Any note can be Home. Set as my home creates a device-local override; vault
 owners/admins can set a shared vault home. Your override takes precedence. An available Home
 opens when the vault opens, and Cmd/Ctrl+Shift+H returns to it. With no available
-Home, the Home button opens the chooser. The chooser lists HTML and linked
+Home, Set a home opens the dashboard template dialog. The sidebar Home options
+open the chooser for existing notes. The chooser lists HTML and linked
 dashboards, with Home first and pinned dashboards before the remaining files;
 there is only one effective Home.
 
-Opening a dashboard slides the sidebar away to give the page the full content
-width. The sidebar toggle can reveal it for that visit. Returning to a normal
-note restores your usual sidebar preference; dashboard browsing does not change it.
+The sidebar's labeled Home section shows that effective Home note above Pinned,
+or offers Set a home when it is unavailable. That action opens the template
+dialog; creating a dashboard and choosing Set as my home remain explicit steps.
+Home navigation lives in the sidebar; there is no duplicate top-bar Home icon.
+Activating the sidebar Home row explicitly opens Home with the sidebar collapsed.
+Opening the same note through a tab, file tree, keyboard shortcut, or startup
+keeps the sidebar visible. Assigning Home alone does not collapse it. This applies
+to every Home format, including Markdown. The effective Home omits the redundant
+Set as my home action, whether chosen personally or inherited from the vault.
+
+The sidebar Home row's options (also available by right-click) include Unset
+Home for a personal Home. Clearing it does not delete the note. If a shared
+Home exists, the action instead says Use vault Home instead because clearing
+the personal override reveals the shared Home. Vault owners/admins can also
+Unset vault Home for everyone; members cannot clear the shared setting.
+
+The sidebar toggle can reveal Home's sidebar after explicit Home navigation.
+Leaving that visit clears its full-width state: returning through a tab or file
+opens normally. Refresh also shows Home's sidebar, independently of the usual
+sidebar preference for other notes. Home browsing does not change that preference.
+
+File-tree row menus group dashboard creation and links under Dashboard, pinning
+under Pin, and personal/shared Home choices under Home. Flyouts open on hover
+or click; arrow keys navigate them, Enter activates, and Escape returns or closes.
 
 Pin notes or folders from their row menu. Personal pins live on this device.
 Owners/admins can also pin for everyone; shared pins appear first and members
@@ -51,29 +86,66 @@ reconciliation rather than relying on local external move recognition.
   watcher picks up the change.
 - **Routines:** configure your agent's scheduler to edit the file or use the
   Baalda MCP connector. Scheduling belongs to the agent; Baalda adds no scheduler.
-- **Installed Codex:** when a supported, signed-in CLI is detected, Update with
-  Codex opens a prompt and streaming log. Cancel stops the process and its children.
-  Detection and compatibility appear under Account Settings → About.
-- **Claude:** use Copy agent prompt. This release does not invoke Claude from
-  Baalda with a subscription login.
+- **Installed agents:** On the effective Home, Update with Claude and Update with Codex each open a
+  prompt and streaming log for that installed CLI. Stop cancels the process and
+  its children. Detection and compatibility appear under Account Settings → About.
+  Sign in through the CLI first; Baalda never opens credential files. Inherited
+  API credentials can select API billing instead of the CLI subscription.
 
-The installed runner requires Codex CLI 0.160.1 or newer with named permission
-profiles. Its dedicated profile permits vault content but denies the vault-root
+Codex requires CLI 0.160.1 or newer and the supported named permission-profile
+flags. Its dedicated profile permits vault content but denies the vault-root
 paths `.context`, `.git`, `.env`, `.claude`, `.codex`, and `.agents`, including
 their contents. These are specific paths, not a blanket denial of every hidden
 file or nested `.env` file. Agent tools cannot access outside the vault apart
-from the CLI's minimal runtime, and their network access is disabled. Codex uses
-its saved CLI login or an inherited `CODEX_API_KEY`; that key can override the
-saved login and use API billing. Baalda neither reads credential files nor
-displays authentication output. Runs skip session rollout persistence; displayed
-logs stay in memory. The runner ignores user configuration and execution-policy
-rules, disables hooks/plugins/apps, and supplies its own permission overrides.
-It refuses detected local project, system, or forced managed configuration using
-presence checks, without reading those files. Organization policy fetched by the
-installed CLI also applies. The runner relies on that CLI's enforcement of its
-permission profile. If this profile is unsupported, use
-Copy agent prompt instead. See the official [Codex non-interactive
-documentation](https://learn.chatgpt.com/docs/non-interactive-mode).
+from the CLI's minimal runtime, and their network access is disabled. The CLI
+itself still connects to its model service. Codex ignores user configuration
+and execution-policy rules, disables hooks/plugins/apps, and skips session
+rollout persistence. The exact user config excluded by `--ignore-user-config`
+is not mistaken for a project config when the vault lives under the user's home.
+Separate project, system, and forced managed configuration still cause a refusal
+using presence checks, without reading their contents. Organization policy
+fetched by the CLI also applies.
+
+Claude requires the installed CLI's `--restricted`, `--safe-mode`, headless and
+permission-control flags. Restricted mode confines its file tools to the vault's
+working directory; Baalda exposes only Read, Glob, Grep, Edit and Write. This is
+Claude Code's tool-permission boundary, **not an OS sandbox**. Shell, code,
+subagent, web and MCP tools are unavailable. Private vault-root paths listed
+above have explicit Read and Edit denials; Claude applies Read denials to Write
+and best-effort search filtering as well. Permission prompts are automatically
+denied rather than bypassed. Safe mode disables user customizations while
+preserving CLI authentication; managed policy still applies. No-session-persistence
+keeps the conversation from being saved. Baalda does not use `--bare`, which would
+disable subscription/keychain authentication.
+
+Home can be any supported note format, including Markdown, HTML, canvas, and
+`.url`/`.webloc` app links. The runner preserves that format. For linked apps or
+Next.js projects it follows the vault map to local source files inside the vault;
+it cannot update a remote host without those sources and does not replace a URL
+shortcut with generated HTML. Missing local sources are reported.
+
+Both providers start in the currently open vault root and receive the same prompt
+over stdin without a shell command string. The prompt explicitly asks them to read
+root `AGENTS.md` (or lowercase `agents.md`) and `CLAUDE.md` when present, follow the
+vault map to relevant notes, JSON, schemas and dashboard API comments, and read
+applicable nested instructions before editing files. This scoped, explicit reading
+does not re-enable automatic CLI customization, hooks or configuration. A requested
+update may change both the dashboard and its supporting user-content data; unrelated
+files, note identities and source values must be preserved. Instructions and linked
+files cannot override the vault/private-data boundaries. Missing context should be
+reported rather than invented. These are agent instructions; the CLI boundaries
+above remain the access controls.
+Displayed logs stay in memory and include only selected text events. Closing
+the dialog or navigating within the vault leaves an update running. Provider
+buttons are hidden away from Home; return to Home to see progress/completion
+and click the matching provider to reopen the same request and
+output, with the original target file shown in the header. Only one update runs
+at a time. Stop explicitly cancels it; changing vaults cancels and clears its
+session. App shutdown also ends the process. Changes
+already written remain in the vault and sync normally. Unsupported CLI versions
+show their compatibility requirement rather than silently running without these
+boundaries. See the official [Codex non-interactive documentation](https://learn.chatgpt.com/docs/non-interactive-mode)
+and [Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference).
 
 ## Optional live bridge
 
@@ -166,13 +238,56 @@ URL=https://example.com/dashboard
 
 XML `.webloc` shortcuts are also readable; binary plist shortcuts are unsupported.
 Both formats can be Home, pinned, shared and edited as ordinary notes. Links must
-use HTTPS without embedded credentials. Known Claude/OpenAI domains are allowed
-by default; Account Settings → About has Allow any HTTPS dashboard link for other
-hosts. Remote pages receive no vault bridge. Open in browser is always available.
-Claude and ChatGPT pages known to block iframe embedding display that fallback;
-other sites may also block embedding, in which case use Open in browser.
+use HTTPS without embedded credentials. All valid HTTPS website links are previewed without a separate provider permission step. Remote pages receive no vault bridge. Open in browser is always available.
+Claude and ChatGPT pages known to block iframe embedding load automatically in
+an unprivileged native child webview inside the current tab. Their HTTPS origin,
+sign-in requirements, and security headers are preserved. The viewer follows the
+tab bounds and closes when that tab unmounts; unique viewer labels guard against
+late cleanup closing a newer tab. Native views sit above DOM layers, so the viewer
+is temporarily hidden while an app menu, dialog, or agent panel is open, then
+restored without reloading. Provider outages or authentication can still prevent
+the page loading. Other sites may also block embedding; Open in browser remains
+available. Browser simulation covers the host layout only, not native rendering.
 
 ## Development verification
+
+### Imported template library and previews
+
+The library contains 20 original upstream dashboard templates. Bundled HTML,
+styles, scripts, fonts and images live in `app/apps/desktop/public/dashboard-templates/`.
+`SOURCES.json` records repositories, revisions, source-page hashes and final artifact
+hashes; adjacent license files retain attribution. These are imported designs, not
+Baalda recreations. Legacy personal starter files remain in source but are not in
+this imported catalog.
+
+Gallery cards use 900 × 900 WebP screenshots in `public/dashboard-thumbnails/`.
+They are captured from the corresponding bundled HTML at a 1200 × 1200 viewport,
+then downsampled and compressed. Regenerate the matching thumbnail when updating
+a template. Card images are lazy-loaded and asynchronously decoded. No card mounts
+an iframe or starts chart scripts. Only clicking Preview mounts the interactive,
+sandboxed HTML; returning to the library unmounts it. For a recognized saved
+dashboard, the expanded preview opens the vault file so edits remain visible.
+Card images represent the original template, not a live snapshot of user edits.
+
+Native template previews use the separate `baalda-view` protocol's fixed
+`/__baalda/template/<id>` allowlist and guest CSP, without a vault SDK bridge.
+The simulator serves the same bundled HTML directly. Public assets avoid Vite
+rewriting these self-contained pages as application entry points. Existing vault
+HTML with the old template-credit banner has that banner hidden during rendering.
+
+Bundling preserves upstream design and license notices, inlines dependencies,
+removes remote tracking, and provides session-only storage for opaque previews.
+Webpack eval wrappers are expanded into scoped functions to fit the guest CSP.
+Tabler uses MIT-licensed ApexCharts 4.2.0 (its license is included). Malformed font
+source declarations and Light Bootstrap's leftover Sass sidebar-width expression
+are repaired for browser parsing. Agent prompts require replacing demo values with
+supported vault facts rather than inventing metrics.
+
+Validate imported CSS, inline JavaScript, offline dependencies, size limits and
+thumbnail availability with `node scripts/verify-dashboard-templates.mjs` from
+`app/apps/desktop/`.
+
+### Checks
 
 Run desktop tests, Rust tests and the relevant server authorization/appearance
 suites against a disposable database. Inspect Windows and macOS simulator layouts
@@ -180,3 +295,11 @@ at normal and narrow widths. A simulator or `tauri dev` cannot verify packaged
 CSP: use a packaged app to check inline/SDK scripts, relative images, blocked
 fetch, keyboard relay, and watcher reload with state/scroll restoration. Native
 Windows WebView2 and actual two-device sharing require separate checks.
+
+New dashboards and linked dashboards default to the root `Dashboards` folder,
+reusing its existing spelling or creating it on save. The destination remains
+editable. Linked dashboards open directly after saving; their `.url`/`.webloc`
+extensions are hidden in navigation labels. Website previews show a provider-aware
+loader until the frame loads and place browser actions over the page. Native
+Claude/ChatGPT viewers retain actions in app chrome because native views sit above
+DOM overlays.

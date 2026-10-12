@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
 import "./App.css";
 import { AccountMenu } from "./components/AccountMenu";
 import { BackendBehindNotice } from "./components/BackendBehindNotice";
@@ -27,7 +27,9 @@ import { BacklinksPanel } from "./components/BacklinksPanel";
 import { EditorEmpty, EditorSkeleton } from "./components/EditorPlaceholders";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { HomeDashboardDialog } from "./components/HomeDashboardDialog";
-import { HomePicker, PinnedSection } from "./components/HomeNavigation";
+import { DashboardHeaderActionsContext } from "./components/DashboardHeaderActions";
+import { DashboardAgentRunner } from "./components/DashboardAgentRunner";
+import { HomePicker, HomeSection, PinnedSection } from "./components/HomeNavigation";
 import { FileTree } from "./components/FileTree";
 import { SyncBadge, syncBadgeHold } from "./components/Identity";
 import { SearchPanel } from "./components/SearchPanel";
@@ -74,7 +76,8 @@ import { setUpdateHintHandler } from "./lib/updateHint";
 import { isSilentRelease, notesForVersion, releaseNoteLines } from "./lib/releaseNotes";
 import { runConfetti } from "./lib/celebrate/celebrate";
 import { viewerFor } from "./lib/formats";
-import { isDashboard } from "./lib/pins";
+import { effectiveHomeNote, homeSidebarVisitKey } from "./lib/pins";
+import { effectiveLockForPath, lockScopesByPath } from "./lib/locks";
 import { onOpenFileRequest } from "./lib/openFileRequest";
 import { editorMeasureStyle } from "./lib/editorMeasure";
 import { noteLabel } from "./lib/notePath";
@@ -1107,14 +1110,27 @@ export default function App() {
   const [graphOpen, setGraphOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [sidebarHidden, setSidebarHidden] = useState(readSidebarHidden);
-  // Dashboards borrow the full window without changing the user's normal
-  // sidebar preference. The toggle can reveal it for this dashboard visit.
-  const dashboardPath = !activeVirtual && openNote && isDashboard(openNote.path)
-    ? `${vault?.path ?? ""}/${openNote.path}` : null;
-  const [dashboardSidebarShown, setDashboardSidebarShown] = useState<string | null>(null);
-  const effectiveSidebarHidden = dashboardPath
-    ? dashboardSidebarShown !== dashboardPath : sidebarHidden;
-  useEffect(() => setDashboardSidebarShown(null), [dashboardPath]);
+  const [dashboardHeaderActionsHost, setDashboardHeaderActionsHost] = useState<HTMLDivElement | null>(null);
+  const homeAgentPath = useStore((s) => {
+    const home = effectiveHomeNote(s);
+    if (!home || s.activeVirtualTab || s.openNote?.path !== home.path) return null;
+    if (["read-only", "no-access", "deleted"].includes(String(s.docSyncState[home.id]))) return null;
+    return effectiveLockForPath(lockScopesByPath(s.tree, s.locks, s.session?.user.id, s.lifts), home.path) ? null : home.path;
+  });
+  // Home opens normally unless its sidebar navigation action explicitly requests full width.
+  const currentHomePath = useStore((s) => {
+    const home = effectiveHomeNote(s);
+    return home && !s.activeVirtualTab && s.openNote?.path === home.path ? home.path : null;
+  });
+  const homeVisitKey = useStore(homeSidebarVisitKey);
+  const [homeSidebarShown, setHomeSidebarShown] = useState<string | null>(null);
+  const [ordinaryHomeHidden, setOrdinaryHomeHidden] = useState(false);
+  useLayoutEffect(() => {
+    setOrdinaryHomeHidden(false);
+    setHomeSidebarShown(null);
+  }, [currentHomePath, homeVisitKey]);
+  const effectiveSidebarHidden = homeVisitKey ? homeSidebarShown !== homeVisitKey
+    : currentHomePath ? ordinaryHomeHidden : sidebarHidden;
   const { width: sidebarWidth, setWidth: setSidebarWidth } = useSidebarWidth();
   // Guards the launch auto-reopen against StrictMode's double-invoke (dev).
   const didAutoReopenRef = useRef(false);
@@ -1609,8 +1625,10 @@ export default function App() {
         <SidebarToggle
           hidden={effectiveSidebarHidden}
           onToggle={() => {
-            if (dashboardPath) {
-              setDashboardSidebarShown((shown) => shown === dashboardPath ? null : dashboardPath);
+            if (homeVisitKey) {
+              setHomeSidebarShown((shown) => shown === homeVisitKey ? null : homeVisitKey);
+            } else if (currentHomePath) {
+              setOrdinaryHomeHidden((hidden) => !hidden);
             } else {
               setSidebarHidden((hidden) => {
                 const next = !hidden;
@@ -1633,6 +1651,7 @@ export default function App() {
           inert={effectiveSidebarHidden}
         >
           <SidebarHeader />
+          <HomeSection />
           <PinnedSection />
           {/* The tree still lists the OUTGOING vault's files until the folder
               swaps, so a switch fades it and stops taking clicks — opening a note
@@ -1658,7 +1677,11 @@ export default function App() {
         </aside>
         {!effectiveSidebarHidden && <SidebarResizer width={sidebarWidth} onWidth={setSidebarWidth} />}
   
+        <DashboardHeaderActionsContext.Provider value={dashboardHeaderActionsHost}>
         <main className="main">
+          <DashboardAgentRunner key={`${vault.path}:${vault.epoch}`}
+            path={homeAgentPath} showLaunchers={homeAgentPath !== null}
+            expectedEpoch={vault.epoch} launchTarget={dashboardHeaderActionsHost} />
           <MemberJoinedBanner />
           <WhatsNewModal />
           {/* Sits flush against the top of the window now that there's no system
@@ -1672,6 +1695,7 @@ export default function App() {
                 title, which for a legacy note whose H1 and filename disagree said
                 something different from its own tab. */}
             <TabBar />
+            <div ref={setDashboardHeaderActionsHost} id="dashboard-header-actions" className="dashboard-header-actions" />
             {/* The right-hand controls float as one pill over the white row. */}
             <div className="header-actions">
               <SyncIndicator
@@ -1790,6 +1814,7 @@ export default function App() {
             <RightPanel />
           </SilentBoundary>
         </main>
+        </DashboardHeaderActionsContext.Provider>
   
         {graphOpen && (
           <ErrorBoundary

@@ -89,8 +89,8 @@ mockIPC(
   (cmd, args: any) => {
     if (cmd === "get_note_ui_state") return uiStates.get(args.docId) ?? null;
     if (cmd === "set_note_ui_state") { uiStates.set(args.docId, args.uiState); return null; }
-    if (cmd === "detect_agents") return [{ agent: "codex", version: "0.160.1 (synthetic)", signedIn: true, runnable: true, detail: "Synthetic preview; no CLI is launched." }, { agent: "claude", version: "2.1 (synthetic)", signedIn: true, runnable: false, detail: "Use Ask AI to change this to copy a prompt." }];
-    if (cmd === "run_agent" || cmd === "cancel_agent") throw new Error("Agent execution is disabled in the simulator.");
+    if (cmd === "detect_agents") return [{ agent: "codex", version: "0.160.1 (synthetic)", signedIn: true, runnable: true, detail: "Synthetic preview; no CLI is launched." }, { agent: "claude", version: "2.1.296 (synthetic)", signedIn: true, runnable: true, detail: "Synthetic preview; no CLI is launched." }];
+    if (cmd === "run_agent" || cmd === "cancel_agent") throw new Error("Agent execution is disabled in the simulator. Use the native app to run an installed CLI.");
     const fixture = fixtureIpc(cmd, args);
     if (fixture.handled) return fixture.value;
     switch (cmd) {
@@ -123,6 +123,25 @@ mockIPC(
           frontmatter: null,
           tags: [],
         };
+      case "mount_dashboard_link": {
+        const panel = document.createElement("div");
+        panel.id = "preview-native-dashboard";
+        panel.textContent = "Linked dashboard · native viewer (simulated)";
+        Object.assign(panel.style, { position: "fixed", left: `${args.bounds.x}px`, top: `${args.bounds.y}px`, width: `${args.bounds.width}px`, height: `${args.bounds.height}px`, background: "#f6f5fa", display: "grid", placeItems: "center", color: "#666", pointerEvents: "none" });
+        document.body.appendChild(panel);
+        setTimeout(() => {
+          args.onLoad.onmessage(null);
+        }, 500);
+        return panel.id;
+      }
+      case "update_dashboard_link": {
+        const panel = document.getElementById(args.label);
+        if (panel) Object.assign(panel.style, { left: `${args.bounds.x}px`, top: `${args.bounds.y}px`, width: `${args.bounds.width}px`, height: `${args.bounds.height}px`, display: args.visible ? "grid" : "none" });
+        return null;
+      }
+      case "unmount_dashboard_link":
+        document.getElementById(args.label)?.remove();
+        return null;
       case "read_note":
       case "dashboard_read_note":
         return noteBytes.get(args.path) ?? "";
@@ -196,7 +215,12 @@ mockIPC(
   { shouldMockEvents: true },
 );
 // Every backend request is handled locally; live WebSocket connections are refused.
-window.fetch = previewFetch;
+const assetFetch = window.fetch.bind(window);
+window.fetch = (input, init) => {
+  const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url, window.location.href);
+  return url.origin === window.location.origin && /^\/dashboard-templates\/[\w-]+\.html$/.test(url.pathname)
+    ? assetFetch(input, init) : previewFetch(input, init);
+};
 const NativeWebSocket = window.WebSocket;
 window.WebSocket = new Proxy(NativeWebSocket, {
   construct(Target, args) {
@@ -248,6 +272,7 @@ useStore.setState({
     const n = notes.find((n) => n.relPath === path);
     if (!n) return;
     useStore.setState({
+      homeActivation: null,
       openNote: { path, id: n.id, title: n.title },
       openTabs: [...new Set([...useStore.getState().openTabs, path])],
       activeVirtualTab: null,

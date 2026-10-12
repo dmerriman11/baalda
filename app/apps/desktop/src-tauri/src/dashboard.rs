@@ -53,7 +53,9 @@ pub fn handle_request<R: tauri::Runtime>(
     tauri::async_runtime::spawn_blocking(move || {
         let _slot = RequestSlot;
         let state = app.state::<AppState>();
-        let result = serve(&state, &request);
+        let result = if let Some(id) = request.uri().path().strip_prefix("/__baalda/template/") {
+            serve_template(&app, id, request.method().as_str())
+        } else { serve(&state, &request) };
         responder.respond(result.unwrap_or_else(|_| {
             response(
                 StatusCode::NOT_FOUND,
@@ -62,6 +64,40 @@ pub fn handle_request<R: tauri::Runtime>(
             )
         }));
     });
+}
+
+const TEMPLATE_IDS: &[&str] = &[
+    "startbootstrap-sb-admin",
+    "material-dashboard-v3",
+    "mazer",
+    "corona-free-dark-bootstrap-admin-template",
+    "StarAdmin-Free-Bootstrap-Admin-Template",
+    "materio-bootstrap-html-admin-template-free",
+    "sneat-html-admin-template-free",
+    "PurpleAdmin-Free-Admin-Template",
+    "startbootstrap-sb-admin-2",
+    "light-bootstrap-dashboard",
+    "AdminLTE",
+    "plainadmin",
+    "argon-dashboard",
+    "tabler",
+    "now-ui-dashboard",
+    "paper-dashboard",
+    "adminkit",
+    "MajesticAdmin-Free-Bootstrap-Admin-Template",
+    "soft-ui-dashboard",
+    "black-dashboard"
+];
+
+fn serve_template<R: tauri::Runtime>(app: &tauri::AppHandle<R>, id: &str, method: &str) -> AppResult<Response<Vec<u8>>> {
+    if method != "GET" || !TEMPLATE_IDS.contains(&id) { return Err(AppError::new("unknown template")); }
+    let path = format!("dashboard-templates/{id}.html");
+    #[cfg(debug_assertions)]
+    let body = { let _ = app; std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("../public").join(&path))
+        .map_err(|_| AppError::new("template unavailable"))? };
+    #[cfg(not(debug_assertions))]
+    let body = app.asset_resolver().get(path).ok_or_else(|| AppError::new("template unavailable"))?.bytes;
+    Ok(response(StatusCode::OK, "text/html; charset=utf-8", body))
 }
 
 fn serve(state: &AppState, request: &Request<Vec<u8>>) -> AppResult<Response<Vec<u8>>> {
@@ -119,7 +155,14 @@ fn serve(state: &AppState, request: &Request<Vec<u8>>) -> AppResult<Response<Vec
             .ok_or_else(|| AppError::new("no vault is open"))?
     };
     let file = resolve_resource(&root, rel)?;
-    let body = read_resource(&file)?;
+    let mut body = read_resource(&file)?;
+    if is_html(rel) {
+        if let Ok(html) = std::str::from_utf8(&body) {
+            if html.contains("baalda-template-credit") {
+                body = html.replacen("</head>", "<style>.baalda-template-credit{display:none!important}</style></head>", 1).into_bytes();
+            }
+        }
+    }
     // A request that was already on disk during a switch must not answer after
     // the switch. Nothing resolves against the global vault outside this guard.
     let inner = state.inner.lock().unwrap();

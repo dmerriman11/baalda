@@ -11,6 +11,7 @@ mod clipboard;
 // and the `#[tauri::command]` wrappers around them are only frame decoding.
 pub mod commands;
 pub mod dashboard;
+mod dashboard_remote;
 mod agent_runner;
 mod error;
 pub mod folder_safety;
@@ -214,6 +215,9 @@ pub fn run() {
             dashboard::dashboard_read_note,
             dashboard::dashboard_mount_view,
             dashboard::dashboard_unmount_view,
+            dashboard_remote::mount_dashboard_link,
+            dashboard_remote::update_dashboard_link,
+            dashboard_remote::unmount_dashboard_link,
             clipboard::clipboard_write,
             relaunch::set_background_relaunch,
             relaunch::launched_in_background,

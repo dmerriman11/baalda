@@ -47,7 +47,7 @@ import {
   type AppearanceSettings,
   type VaultAppearanceSettings,
 } from "./lib/appearanceSettings";
-import { readPersonalPins, readPersonalHome, writePersonalPins, writePersonalHome, renamePinnedFolders, togglePinned, resolveHome, type PinnedItem } from "./lib/pins";
+import { readPersonalPins, readPersonalHome, writePersonalPins, writePersonalHome, renamePinnedFolders, togglePinned, effectiveHomeNote, type PinnedItem } from "./lib/pins";
 import { applyEffectiveTheme, type ThemeMode } from "./lib/theme";
 import { syncManager } from "./lib/sync/docSession";
 import { vaultScopes } from "./lib/sync/vaultScope";
@@ -76,6 +76,8 @@ import {
   writeEditorFontSize,
   applyEditorFontSize,
   readLineNumbers,
+  readHomeSectionHidden,
+  writeHomeSectionHidden,
   readPropertiesMode,
   readTreeSort,
   readFolderSorts,
@@ -572,6 +574,8 @@ interface AppStore {
   editorFontSize: number;
   /** Show the editor's line-number gutter. Off by default. */
   lineNumbers: boolean;
+  homeSectionHidden: boolean;
+  setHomeSectionHidden: (hidden: boolean) => void;
   /** This device's personal appearance OVERRIDES (absent key = inherit the
    *  open vault's default). The five editor/colour fields above and
    *  `themeMode` are the EFFECTIVE values derived from these, the open
@@ -584,9 +588,10 @@ interface AppStore {
   personalHomeDocId: string | null;
   homePickerOpen: boolean;
   homeLandingPending: boolean;
+  homeActivation: { vaultPath: string; path: string; revision: number; toggleSidebar?: boolean } | null;
   togglePin: (path: string, isDir: boolean, scope?: "personal" | "vault") => Promise<void>;
   setHome: (path: string | null, scope?: "personal" | "vault") => Promise<void>;
-  openHome: (pickerIfMissing?: boolean) => Promise<boolean>;
+  openHome: (pickerIfMissing?: boolean, fullscreen?: boolean) => Promise<boolean>;
   /** The effective theme mode currently painted. */
   themeMode: ThemeMode;
   /** How the sidebar arranges everything the user hasn't arranged by hand.
@@ -1977,8 +1982,8 @@ export const useStore = create<AppStore>((set, get) => ({
   tree: null,
   openNote: null,
   openVirtualTab: (tab) =>
-    set((s) => ({ virtualTabs: upsertTab(s.virtualTabs, tab), activeVirtualTab: tab.id })),
-  activateVirtualTab: (id) => set({ activeVirtualTab: id }),
+    set((s) => ({ virtualTabs: upsertTab(s.virtualTabs, tab), activeVirtualTab: tab.id, homeActivation: null })),
+  activateVirtualTab: (id) => set({ activeVirtualTab: id, homeActivation: null }),
   closeVirtualTab: (id) =>
     set((s) => {
       const next = s.virtualTabs.filter((t) => t.id !== id);
@@ -2098,6 +2103,11 @@ export const useStore = create<AppStore>((set, get) => ({
   editorMeasure: readEditorMeasure(),
   editorFontSize: readEditorFontSize(),
   lineNumbers: readLineNumbers(),
+  homeSectionHidden: readHomeSectionHidden(),
+  setHomeSectionHidden: (hidden) => {
+    writeHomeSectionHidden(hidden);
+    set({ homeSectionHidden: hidden });
+  },
   appearanceOverrides: readAppearanceOverrides(null),
   vaultAppearance: {},
   themeMode: "system",
@@ -2110,6 +2120,7 @@ export const useStore = create<AppStore>((set, get) => ({
   personalHomeDocId: null,
   homePickerOpen: false,
   homeLandingPending: false,
+  homeActivation: null,
   togglePin: async (path, isDir, scope = "personal") => {
     const vault = get().vault;
     if (!vault) return;
@@ -2136,21 +2147,29 @@ export const useStore = create<AppStore>((set, get) => ({
     if (!sameVault(get, epoch) || (path && !docId)) return;
     if (scope === "personal") {
       writePersonalHome(vault.path, docId ?? null);
-      set({ personalHomeDocId: docId ?? null });
+      set({ personalHomeDocId: docId ?? null, homeActivation: null });
     } else {
       const orgId = get().syncEnabled ? get().session?.activeOrganizationId : null;
       if (!orgId) throw new Error("A synced vault is required");
       const res = await authManager.api.patchVaultAppearance(orgId, { homeDocId: docId ?? null });
       get().receiveVaultAppearance(orgId, res.settings);
     }
+    if (path && sameVault(get, epoch)) get().setHomeSectionHidden(false);
   },
-  openHome: async (pickerIfMissing = true) => {
-    const orgId = get().syncEnabled ? get().session?.activeOrganizationId : null;
-    const id = resolveHome(get().personalHomeDocId, orgId ? get().vaultAppearance[orgId]?.homeDocId : null);
-    const target = id ? get().titles.find((t) => t.id === id) : null;
+  openHome: async (pickerIfMissing = true, fullscreen = false) => {
+    const target = effectiveHomeNote(get());
     if (target) {
+      const vault = get().vault;
+      const revision = (get().homeActivation?.revision ?? 0) + 1;
       set({ homePickerOpen: false });
       await get().openNoteByPath(target.path);
+      // Full width is an explicit sidebar Home action, never ordinary navigation.
+      // Failed/superseded opens must not change the layout of another note.
+      if (fullscreen && vault && get().vault?.path === vault.path && get().vault?.epoch === vault.epoch &&
+          get().openNote?.path === target.path && !get().activeVirtualTab && !get().openingNotePath) {
+        set({ homeActivation: { vaultPath: vault.path, path: target.path,
+          revision } });
+      }
       return true;
     }
     if (pickerIfMissing) set({ homePickerOpen: true });
@@ -2174,7 +2193,7 @@ export const useStore = create<AppStore>((set, get) => ({
       personalPins: readPersonalPins(v?.path),
       personalHomeDocId: readPersonalHome(v?.path),
       homePickerOpen: false,
-      ...(switched ? { homeLandingPending: true } : {}),
+      ...(switched ? { homeLandingPending: true, homeActivation: null } : {}),
       itemColors: readItemColors(v?.path),
       itemOrder: readItemOrder(v?.path),
       folderSorts: readFolderSorts(v?.path),
@@ -2492,7 +2511,7 @@ export const useStore = create<AppStore>((set, get) => ({
     // so the row stays unselected and the editor keeps showing the previous note
     // for the whole round trip — a click that visibly does nothing. The sidebar
     // row and the editor both watch this and acknowledge the click at once.
-    set({ openingNotePath: path, homeLandingPending: false });
+    set({ openingNotePath: path, homeLandingPending: false, homeActivation: null });
     try {
       // The boot paints before sync primes, so this click can land while the
       // registry holds no doc-id map. Opening a MAPPED note then means opening
@@ -3550,7 +3569,8 @@ export const useStore = create<AppStore>((set, get) => ({
   },
 
   receiveVaultAppearance: (orgId, settings) => {
-    set({ vaultAppearance: { ...get().vaultAppearance, [orgId]: settings } });
+    set({ vaultAppearance: { ...get().vaultAppearance, [orgId]: settings },
+      ...(get().vaultAppearance[orgId]?.homeDocId !== settings.homeDocId ? { homeActivation: null } : {}) });
     get().applyAppearance();
     if (get().homeLandingPending && !get().openNote && !get().openingNotePath && !get().activeVirtualTab) void get().openHome(false).catch((e) => console.warn("[home] landing failed", e));
   },

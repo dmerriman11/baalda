@@ -452,11 +452,23 @@ export async function registerFolder(
   const id = randomUUID();
   const color = normalizeColor(input.color) ?? null;
   try {
-    await ctx.db.query(
+    const { rows: inserted } = await ctx.db.query<{ created_by: string | null; created_at: Date }>(
       `INSERT INTO folders (id, vault_id, parent_id, name, path, sort, created_by, color)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING created_by, created_at`,
       [id, ctx.vaultId, resolvedParent, input.name, storedPath, input.sort ?? 0, ctx.userId, color],
     );
+    // The stored row, as `canEditFolder` would SELECT it, for a child of this
+    // folder later in the same batch (a no-op unless the batch preloaded).
+    if (inserted[0]) {
+      ctx.resolverCache.seedFolder({
+        id,
+        parentId: resolvedParent,
+        vaultId: ctx.vaultId,
+        createdBy: inserted[0].created_by,
+        createdAt: inserted[0].created_at,
+      });
+    }
   } catch (err) {
     // Lost the race against another device registering the same path
     // (`folders_vault_path_uq` m022 / `folders_vault_path_ci_uq` m023). Adopt

@@ -15,7 +15,7 @@ import {
   registerNotes,
   type RegisterCtx,
 } from "../../registry/batch-ops.js";
-import { dirname, samePath } from "../../registry/tree-ops.js";
+import { dirname, pathKey, samePath } from "../../registry/tree-ops.js";
 import { purgeNoteIndex } from "../../index/indexer.js";
 import {
   applyDocPushBatch,
@@ -265,6 +265,15 @@ export function createBulkRoutes(deps: BulkDeps = {}): Hono {
         ...ordered.map((i) => i.path),
         ...ordered.map((i) => dirname(i.path)),
       ]);
+      // Every EXISTING parent's row, ancestor chain and share rows in three
+      // queries, so `canCreateIn` stops costing ~5 serial reads per folder.
+      // Folders created below are seeded as they are inserted. The verdict is
+      // still `canEditFolder`'s own; see `ResolverCache.preloadFolders`.
+      const existingParents = ordered
+        .map((i) => ctx.cache.folders.get(pathKey(dirname(i.path))))
+        .filter((f): f is NonNullable<typeof f> => !!f)
+        .map((f) => f.id);
+      await ctx.resolverCache.preloadFolders(ctx.db, ctx.vaultId, existingParents);
       for (const item of ordered) {
         try {
           const out = await registerFolder(ctx, { path: item.path, name: item.name, color: item.color });

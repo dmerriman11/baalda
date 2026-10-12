@@ -124,6 +124,40 @@ export interface ResolverCache {
   prefetch(db: Queryable, docIds: readonly string[]): Promise<void>;
   /** A doc loaded by {@link prefetch}, or undefined (resolve it live). */
   preloaded(docId: string): PreloadedDoc | undefined;
+  /**
+   * Load, in three queries, everything `canEditFolder` reads for the given
+   * folders of one vault: the vault's org, each folder row and its full
+   * ancestor chain, and every share row on those folders and on the vault
+   * resource. `canEditFolder` then answers from these rows through the SAME
+   * in-memory predicates the {@link AccessIndex} path uses (each one the twin
+   * of its SELECT); its branch logic is untouched. A folder not covered (not
+   * found, chain leaving the preload, a cycle) is resolved live, as before.
+   */
+  preloadFolders(db: Queryable, vaultId: string, folderIds: readonly string[]): Promise<void>;
+  /** A folder covered by {@link preloadFolders} / {@link seedFolder}, or undefined. */
+  preloadedFolder(folderId: string): PreloadedFolder | undefined;
+  /**
+   * Record a folder THIS request just inserted (values from its RETURNING), so
+   * the next `canEditFolder` on it reads them instead of re-selecting. A new
+   * random id carries no share rows. No-op unless its vault was preloaded.
+   */
+  seedFolder(folder: {
+    id: string;
+    parentId: string | null;
+    vaultId: string;
+    createdBy: string | null;
+    createdAt: Date;
+  }): void;
+}
+
+/** A folder as {@link ResolverCache.preloadFolders} loaded it: the row
+ *  `canEditFolder` selects, its chain, and the org's partial index. */
+export interface PreloadedFolder {
+  row: { created_by: string | null; organization_id: string; created_at: Date };
+  chain: string[];
+  /** Holds the chain folders and their share rows plus the vault rows. Never
+   *  notes or files, so only folder-resource lookups may use it. */
+  index: AccessIndex;
 }
 
 /** The per-(vault, user) facts {@link ResolverCache.membership} returns. */
@@ -156,6 +190,10 @@ export function createResolverCache(): ResolverCache {
   const chains = new Map<string, Promise<string[]>>();
   const memberships = new Map<string, Promise<MembershipFacts>>();
   const preloadedDocs = new Map<string, PreloadedDoc>();
+  const folderIndexes = new Map<string, AccessIndex>(); // by organization id
+  const vaultOrgs = new Map<string, string>(); // vault id → organization id
+  const folderRows = new Map<string, PreloadedFolder["row"]>();
+  const vaultSharesLoaded = new Set<string>(); // organization ids
   // The promise is cached, not the value, so N concurrent resolves of the same
   // key share ONE in-flight query instead of racing to fill the entry.
   const memo = <T>(m: Map<string, Promise<T>>, key: string, run: () => Promise<T>): Promise<T> => {
@@ -216,6 +254,88 @@ export function createResolverCache(): ResolverCache {
       }
     },
     preloaded: (docId) => preloadedDocs.get(docId),
+    preloadFolders: async (db, vaultId, folderIds) => {
+      const { rows: vaults } = await db.query<{ organization_id: string }>(
+        `SELECT organization_id FROM vaults WHERE id = $1`,
+        [vaultId],
+      );
+      const organizationId = vaults[0]?.organization_id;
+      if (!organizationId) return;
+      vaultOrgs.set(vaultId, organizationId);
+      let index = folderIndexes.get(organizationId);
+      if (!index) {
+        index = { organizationId, shares: new Map(), folders: new Map(), notes: new Map(), files: new Map() };
+        folderIndexes.set(organizationId, index);
+      }
+      const wanted = [...new Set(folderIds)].filter((id) => !index!.folders.has(id));
+      // The same walk as `ancestorFolderIds` (parent_id, no vault filter), for
+      // every start folder at once. UNION: shared ancestors read once, a cycle
+      // ends (and `indexedAncestors` then reports it, so it resolves live).
+      const chain = wanted.length === 0
+        ? { rows: [] as Array<{ id: string; parent_id: string | null; vault_id: string; created_by: string | null; created_at: Date; organization_id: string | null }> }
+        : await db.query<{
+            id: string;
+            parent_id: string | null;
+            vault_id: string;
+            created_by: string | null;
+            created_at: Date;
+            organization_id: string | null;
+          }>(
+            `WITH RECURSIVE chain AS (
+                SELECT id FROM folders WHERE id = ANY($1::text[])
+                UNION
+                SELECT f.parent_id FROM folders f JOIN chain c ON f.id = c.id
+                 WHERE f.parent_id IS NOT NULL
+             )
+             SELECT f.id, f.parent_id, f.vault_id, f.created_by, f.created_at, v.organization_id
+               FROM folders f
+               JOIN chain c ON c.id = f.id
+               LEFT JOIN vaults v ON v.id = f.vault_id`,
+            [wanted],
+          );
+      const fresh = chain.rows.filter((r) => !index!.folders.has(r.id));
+      for (const r of fresh) {
+        index.folders.set(r.id, { parentId: r.parent_id, vaultId: r.vault_id, createdAt: r.created_at });
+        // The row `canEditFolder` selects (`JOIN vaults`): only for this org,
+        // so a preloaded folder always pairs with its own org's index.
+        if (r.organization_id === organizationId) {
+          folderRows.set(r.id, { created_by: r.created_by, organization_id: r.organization_id, created_at: r.created_at });
+        }
+      }
+      // Every share row on those folders and on the vault resource, unfiltered
+      // by principal: the in-memory predicates apply each SELECT's filters.
+      const loaded = fresh.map((r) => r.id);
+      const vaultLoaded = vaultSharesLoaded.has(organizationId);
+      const { rows: shares } = await db.query<ShareRow>(
+        `SELECT resource_type, resource_id, principal_type, principal_id, permission, access_revision
+           FROM shares
+          WHERE (resource_type = 'folder' AND resource_id = ANY($1::text[]))
+             OR ($3::boolean AND resource_type = 'vault' AND resource_id = $2)`,
+        [loaded, organizationId, !vaultLoaded],
+      );
+      vaultSharesLoaded.add(organizationId);
+      for (const r of shares) {
+        const key = shareKey(r.resource_type, r.resource_id);
+        const list = index.shares.get(key);
+        if (list) list.push(r);
+        else index.shares.set(key, [r]);
+      }
+    },
+    preloadedFolder: (folderId) => {
+      const row = folderRows.get(folderId);
+      if (!row) return undefined;
+      const index = folderIndexes.get(row.organization_id);
+      if (!index) return undefined;
+      const chain = indexedAncestors(index, folderId);
+      return chain ? { row, chain, index } : undefined;
+    },
+    seedFolder: (folder) => {
+      const organizationId = vaultOrgs.get(folder.vaultId);
+      const index = organizationId ? folderIndexes.get(organizationId) : undefined;
+      if (!organizationId || !index || index.folders.has(folder.id)) return;
+      index.folders.set(folder.id, { parentId: folder.parentId, vaultId: folder.vaultId, createdAt: folder.createdAt });
+      folderRows.set(folder.id, { created_by: folder.createdBy, organization_id: organizationId, created_at: folder.createdAt });
+    },
   };
 }
 
@@ -484,7 +604,7 @@ function indexedPersonalVault(index: AccessIndex, userId: string): PersonalVault
 }
 
 /** In-memory {@link isDenied}. The file branch matches `resource_type = 'file'`. */
-function indexedIsDenied(
+export function indexedIsDenied(
   index: AccessIndex,
   principalType: "user" | "org",
   principalId: string,
@@ -495,7 +615,7 @@ function indexedIsDenied(
 }
 
 /** In-memory {@link isLocked}: an org row matches whatever its principal id. */
-function indexedIsLocked(index: AccessIndex, userId: string, docId: string | null, folderIds: string[]): boolean {
+export function indexedIsLocked(index: AccessIndex, userId: string, docId: string | null, folderIds: string[]): boolean {
   return rowsLocked(indexedRows(index, docId, folderIds), userId, docId, folderIds);
 }
 

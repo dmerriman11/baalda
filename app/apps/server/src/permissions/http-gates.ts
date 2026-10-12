@@ -4,7 +4,10 @@ import { orgRole, vaultOrg } from "./lookup.js";
 import {
   ancestorFolderIds,
   buildAccessContext,
+  buildAccessContextFromIndex,
   effectivePermission,
+  indexedIsDenied,
+  indexedIsLocked,
   isDenied,
   isLocked,
   memberAccessSnapshot,
@@ -108,17 +111,23 @@ export async function canEditFolder(
    *  the answer — see `permissions/resolver.ts ResolverCache`. */
   cache?: ResolverCache,
 ): Promise<boolean> {
-  const { rows } = await db.query<{
-    created_by: string | null;
-    organization_id: string;
-    created_at: Date;
-  }>(
-    `SELECT f.created_by, v.organization_id, f.created_at
-       FROM folders f JOIN vaults v ON v.id = f.vault_id
-      WHERE f.id = $1`,
-    [folderId],
-  );
-  const row = rows[0];
+  // Rows preloaded for a batch (`ResolverCache.preloadFolders`) replace the
+  // SELECTs below one for one; every branch still runs exactly as written.
+  const pre = cache?.preloadedFolder(folderId);
+  const row = pre
+    ? pre.row
+    : (
+        await db.query<{
+          created_by: string | null;
+          organization_id: string;
+          created_at: Date;
+        }>(
+          `SELECT f.created_by, v.organization_id, f.created_at
+             FROM folders f JOIN vaults v ON v.id = f.vault_id
+            WHERE f.id = $1`,
+          [folderId],
+        )
+      ).rows[0];
   if (!row) return false;
   // Billing lapse: nothing is writable, owners included (before every overlay).
   if (await isAccountReadOnly(db, row.organization_id, cache)) return false;
@@ -130,12 +139,18 @@ export async function canEditFolder(
 
   // Overlays first — they outrank the role below, because what the Access panel
   // sets applies to whoever set it.
-  const chain = cache
-    ? await cache.ancestors(db, folderId)
-    : await ancestorFolderIds(db, folderId);
-  if (await isDenied(db, "user", userId, null, chain)) return false;
-  if (await isLocked(db, userId, null, chain)) return false;
-  const itemPrivate = await isDenied(db, "org", row.organization_id, null, chain);
+  const chain = pre
+    ? pre.chain
+    : cache
+      ? await cache.ancestors(db, folderId)
+      : await ancestorFolderIds(db, folderId);
+  const denied = (principalType: "user" | "org", principalId: string) =>
+    pre
+      ? Promise.resolve(indexedIsDenied(pre.index, principalType, principalId, null, chain))
+      : isDenied(db, principalType, principalId, null, chain);
+  if (await denied("user", userId)) return false;
+  if (pre ? indexedIsLocked(pre.index, userId, null, chain) : await isLocked(db, userId, null, chain)) return false;
+  const itemPrivate = await denied("org", row.organization_id);
   const baseline = cache
     ? await cache.baseline(db, row.organization_id)
     : await vaultBaseline(db, row.organization_id);
@@ -158,10 +173,14 @@ export async function canEditFolder(
   // An item set Private, a Read-only vault, a sealed vault and a pre-join
   // folder all skip the shortcuts AND the creator rule, and let the share
   // lookup decide — that is how a folder marked Shared still lifts someone out.
+  const accessContext = () =>
+    pre
+      ? buildAccessContextFromIndex(pre.index, "folder", folderId, db, cache)
+      : buildAccessContext("folder", folderId, db, cache);
   if (personal !== null || itemPrivate || readOnlyVault || sealedVault || existingAtJoin) {
-    const ctx = await buildAccessContext("folder", folderId, db, cache);
+    const ctx = await accessContext();
     if (!ctx) return false;
-    return (await resolveAccessForUser(ctx, userId, role, db, cache)).permission === "edit";
+    return (await resolveAccessForUser(ctx, userId, role, db, cache, pre?.index)).permission === "edit";
   }
   // A never-shared vault skips only the role shortcut; the creator rule below
   // is the private-by-default space, so it has to stay ordered this way round.
@@ -169,9 +188,9 @@ export async function canEditFolder(
   if (row.created_by && row.created_by === userId) return true;
 
   // Else: an explicit user/team edit share on the folder or an ancestor.
-  const ctx = await buildAccessContext("folder", folderId, db, cache);
+  const ctx = await accessContext();
   if (!ctx) return false;
-  const resolved = await resolveAccessForUser(ctx, userId, role, db, cache);
+  const resolved = await resolveAccessForUser(ctx, userId, role, db, cache, pre?.index);
   return resolved.permission === "edit";
 }
 

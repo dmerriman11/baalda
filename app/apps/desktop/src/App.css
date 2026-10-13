@@ -8539,8 +8539,27 @@ button.secondary:active:not(:disabled),
 }
 
 /* ── Settings → Members and access ─────────────────────────────────────── */
+.members-access-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-3);
+}
+.members-access-header .settings-section-title {
+  margin: 0;
+}
+.members-access-header .primary {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  height: 38px;
+  padding-top: 0;
+  padding-bottom: 0;
+}
 .members-access-intro {
-  margin: calc(-1 * var(--sp-2)) 0 var(--sp-4);
+  margin: 0 0 var(--sp-4);
   color: var(--text-secondary);
   font-size: var(--fs-sm);
 }
@@ -8608,18 +8627,38 @@ button.secondary:active:not(:disabled),
   gap: var(--sp-2);
   font-size: var(--fs-sm);
 }
-.members-access-toolbar {
+.members-access-list-heading {
   display: flex;
   align-items: center;
-  gap: var(--sp-3);
+  flex-wrap: wrap;
+  gap: var(--sp-2);
   margin-bottom: var(--sp-3);
+}
+.members-access-list-heading h3 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+.members-access-search-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  width: 320px;
+  max-width: 100%;
+  margin-bottom: var(--sp-3);
+}
+.members-access-search-label {
+  color: var(--text-secondary);
+  font-size: var(--fs-xs);
 }
 .members-access-search {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
-  flex: 1;
   min-width: 0;
+  height: 38px;
+  box-sizing: border-box;
   padding: 0 var(--sp-3);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -8652,21 +8691,7 @@ button.secondary:active:not(:disabled),
 .members-access-search input::-webkit-search-cancel-button {
   cursor: pointer;
 }
-/* Search and Invite share one height and centre line. */
-.members-access-search,
-.members-access-toolbar .primary {
-  height: 38px;
-  box-sizing: border-box;
-}
-.members-access-toolbar .primary {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  padding-top: 0;
-  padding-bottom: 0;
-}
 .members-access-count {
-  margin-bottom: var(--sp-2);
   font-size: var(--fs-xs);
 }
 .members-table {
@@ -10175,10 +10200,6 @@ body.access-board-grabbing * {
   color: var(--accent);
   background: color-mix(in srgb, var(--accent) 16%, transparent);
 }
-.members-access-seat-line {
-  margin: 0 0 var(--sp-2);
-}
-
 /* ============================================================
    Upgrade dialog, team mode: Free | Team plan comparison
    ============================================================ */

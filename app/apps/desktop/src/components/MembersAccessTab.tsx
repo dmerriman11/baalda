@@ -11,7 +11,7 @@ import type {
   TeamAccessMode,
 } from "../lib/api";
 import { authManager } from "../lib/auth/authManager";
-import { freeLimitOf, membersSeatLine } from "../lib/billing";
+import { freeLimitOf } from "../lib/billing";
 import { rosterCache, type RosterSnapshot } from "../lib/membersAccessCaches";
 import { buildInviteLink, isInvitationExpired } from "../lib/inviteLink";
 import {
@@ -491,30 +491,15 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
 
   return (
     <div className="members-access">
-      <h2 className="settings-section-title">Members and access</h2>
+      <div className="members-access-header">
+        <h2 className="settings-section-title">Members and access</h2>
+        {manage && (
+          <button className="primary" onClick={() => setInviteOpen(true)}>Invite people</button>
+        )}
+      </div>
       <p className="members-access-intro">Owners and admins can always manage access.</p>
       {error && <div className="auth-error">{error}</div>}
       {limitCause != null && <PeopleLimitNotice error={limitCause} canManageBilling={myRole === "owner"} ownerName={ownerName(members)} freeLimit={seatAccount ? freeLimitOf(seatAccount) : null} />}
-
-      {manage && seatAccount && (
-        <p className="members-access-mcp-hint members-access-seat-line">
-          <span>
-            {membersSeatLine(seatAccount, ownerName(members), myRole === "owner")}
-            {seatAccount.plan === "team" && seatAccount.seats.purchased != null && myRole === "owner" && (
-              <>
-                {" "}
-                <button
-                  type="button"
-                  className="link-btn"
-                  onClick={() => useStore.getState().requestAccountSettings("plan")}
-                >
-                  Add seats
-                </button>
-              </>
-            )}
-          </span>
-        </p>
-      )}
 
       {manage && (
         <div className="members-access-rows">
@@ -566,25 +551,24 @@ export function MembersAccessTab({ canManage, onOpenTab, onCloseSettings, resetT
         </div>
       )}
 
-      <div className="members-access-toolbar">
-        <label className="members-access-search">
+      <div className="members-access-list-heading">
+        <h3>People</h3>
+        <span className="members-access-count muted">
+          {overview ? countLine(query, shown.members.length, shown.invitations.length) : <span className="skel-line members-skel-count" aria-hidden="true" />}
+        </span>
+      </div>
+      <label className="members-access-search-field">
+        <span className="members-access-search-label">Search this list</span>
+        <span className="members-access-search">
           <SearchIcon />
           <input
             type="search"
-            placeholder="Find people"
+            placeholder="Name or email"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            aria-label="Find people"
           />
-        </label>
-        {manage && (
-          <button className="primary" onClick={() => setInviteOpen(true)}>Invite people</button>
-        )}
-      </div>
-
-      <div className="members-access-count muted">
-        {overview ? countLine(query, shown.members.length, shown.invitations.length) : <span className="skel-line members-skel-count" aria-hidden="true" />}
-      </div>
+        </span>
+      </label>
 
       {!overview && <TableSkeleton manage={manage} />}
 

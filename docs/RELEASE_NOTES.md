@@ -21,6 +21,14 @@
     (every app still installs it). Ask before each release: silent, or notes?
 -->
 
+## 0.1.83
+
+- Introducing dashboards: a visual layer for your second brain. Turn your notes into a home for projects, plans, and the things you want to keep in view.
+- Make a dashboard your Home so it opens with your vault. Start from a template and change it to fit the way you work.
+- Share a dashboard or set a shared Home for your team, so everyone has the same place to return to.
+- Keep it up to date with Claude or Codex, or edit it yourself. Changes sync across your team.
+- Minor bug fixes and improvements to syncing, sharing, and managing members.
+
 ## 0.1.82
 
 - Agentic OS templates: explore Orbit’s animated command center, Waystation’s isometric studio, and Meridian’s personal workspace. All start dark, include light mode, and come with sample data.

@@ -21,7 +21,7 @@
 // production computes rather than a restatement of them here.
 
 import { createHash } from "node:crypto";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import type { VaultSyncEngineOptions } from "../vaultSyncEngine";
 import type { VaultDocStoreOptions } from "../vaultDocStore";
@@ -193,6 +193,8 @@ vi.mock("../../ipc", () => ({
   clearYjsDoc: vi.fn(async () => {}),
   listTags: vi.fn(async () => []),
   listNoteTitles: vi.fn(async () => []),
+  listDiskDrift: vi.fn(async () => []),
+  listFileRows: vi.fn(async () => []),
   pruneYjsDocs: vi.fn(async () => ({ docsRemoved: 0, updatesRemoved: 0, bytesReclaimed: 0 })),
   listAttachments: vi.fn(async () => []),
   listBinaries: vi.fn(async () =>
@@ -200,6 +202,18 @@ vi.mock("../../ipc", () => ({
   ),
   readBinaryFile: vi.fn(async () => new Uint8Array()),
   writeBinaryFile: vi.fn(async () => {}),
+}));
+
+// The note-sync fixtures must never reach a real server. In particular, the
+// attachment pass started by enable() otherwise logs a rejected fetch AFTER
+// the worker closes, causing Vitest's onUserConsoleLog teardown error.
+vi.mock("../../auth/authManager", () => ({
+  api: {
+    listVaultBlobs: vi.fn(async () => []),
+    listFileTombstones: vi.fn(async () => []),
+    downloadBlob: vi.fn(async () => new Uint8Array()),
+    resetNoteHistory: vi.fn(async () => {}),
+  },
 }));
 
 /** The vault channel. Captures its options so a test can play server frames. */
@@ -354,7 +368,10 @@ function session(): SessionInfo {
   } as unknown as SessionInfo;
 }
 
+const managers = new Set<SyncManager>();
+
 async function enable(sm: SyncManager) {
+  managers.add(sm);
   return sm.enable(session(), { orgId: "org-a", name: "a", path: "/vaults/a", epoch: 1 });
 }
 
@@ -363,8 +380,25 @@ const flush = async () => {
   for (let i = 0; i < 20; i++) await Promise.resolve();
 };
 
+afterEach(async () => {
+  try {
+    for (const sm of managers) {
+      const settled = sm.whenBulkSyncSettled();
+      sm.disable();
+      await settled;
+    }
+    await flush();
+    expect(fetch).not.toHaveBeenCalled();
+  } finally {
+    managers.clear();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  }
+});
+
 beforeEach(() => {
   vi.useRealTimers();
+  vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("Unexpected HTTP request in sync unit test")));
   vaultScopes.end();
   storeHooks.parked.clear();
   storeHooks.settles = [];
@@ -708,7 +742,6 @@ describe("SyncManager — ready.empty is the authority", () => {
     engineHooks.opts!.onInboundIdle?.();
     await flush();
     expect(progress[progress.length - 1]?.phase).toBe("done");
-    vi.useRealTimers();
   });
 
   it("does not trip the watchdog once the channel has reached ready", async () => {
@@ -725,7 +758,6 @@ describe("SyncManager — ready.empty is the authority", () => {
     await vi.advanceTimersByTimeAsync(31_000);
     await flush();
     expect(progress[progress.length - 1]?.phase).not.toBe("error");
-    vi.useRealTimers();
   });
 
   it("starts a fresh bulk download after a large live grant and its registry pull", async () => {
@@ -746,7 +778,6 @@ describe("SyncManager — ready.empty is the authority", () => {
     expect(bulk).toHaveBeenCalledTimes(1);
     expect(engineHooks.refreshes).toBeGreaterThan(0);
     sm.disable();
-    vi.useRealTimers();
   });
 
   it("keeps download progress alive while a paused connection is draining content", async () => {
@@ -765,7 +796,6 @@ describe("SyncManager — ready.empty is the authority", () => {
     expect(progress[progress.length - 1]?.phase).toBe("downloading");
     expect(progress[progress.length - 1]?.done).toBe(4);
     sm.disable();
-    vi.useRealTimers();
   });
 });
 
@@ -789,7 +819,6 @@ describe("SyncManager.handleLocalFilesChanged", () => {
     expect(sm.hasPendingRegistryPull()).toBe(true);
     await vi.advanceTimersByTimeAsync(300);
     expect(fakeRegistry.pull).toHaveBeenCalledTimes(1);
-    vi.useRealTimers();
   });
 
   it("queues mapped notes for a content push without pulling the registry", async () => {
@@ -806,7 +835,6 @@ describe("SyncManager.handleLocalFilesChanged", () => {
     await vi.advanceTimersByTimeAsync(300);
     expect(fakeRegistry.pull).not.toHaveBeenCalled();
     fakeRegistry.getMapping.mockReturnValue(null);
-    vi.useRealTimers();
   });
 
   it("ignores the watcher echo of the registry's OWN materialized placeholder", async () => {
@@ -832,7 +860,6 @@ describe("SyncManager.handleLocalFilesChanged", () => {
     await vi.advanceTimersByTimeAsync(1000);
     expect(storeHooks.promoted).toContain("f1");
     fakeRegistry.getMapping.mockReturnValue(null);
-    vi.useRealTimers();
   });
 
   it("does not swallow a real edit coalesced with a materialized placeholder echo", async () => {
@@ -853,7 +880,6 @@ describe("SyncManager.handleLocalFilesChanged", () => {
     expect(fakeRegistry.materialized.size).toBe(0);
     fakeRegistry.getMapping.mockReturnValue(null);
     fakeRegistry.mappedNotes.mockReturnValue([]);
-    vi.useRealTimers();
   });
 
   it("ignores the watcher echo of a folder the pull itself created or removed — no pull chain", async () => {
@@ -879,7 +905,6 @@ describe("SyncManager.handleLocalFilesChanged", () => {
     expect(sm.hasPendingRegistryPull()).toBe(true);
     await vi.advanceTimersByTimeAsync(1000);
     expect(fakeRegistry.pull).toHaveBeenCalledTimes(1);
-    vi.useRealTimers();
   });
 
   it("never lets a binary reach the note path — no pull, no push, no `notes` row", async () => {
@@ -909,7 +934,6 @@ describe("SyncManager.handleLocalFilesChanged", () => {
       { path: "Team/Plan.md", kind: "modified" },
     ]);
     expect(sm.hasPendingRegistryPull()).toBe(true);
-    vi.useRealTimers();
   });
 
   it("the single-event form still routes exactly like one batch of one", async () => {
@@ -920,7 +944,6 @@ describe("SyncManager.handleLocalFilesChanged", () => {
     sm.handleLocalFileChanged("New.md", "modified");
     await vi.advanceTimersByTimeAsync(300);
     expect(fakeRegistry.pull).toHaveBeenCalledTimes(1);
-    vi.useRealTimers();
   });
 
   // ---- `unchanged` entries (#155) ------------------------------------------
@@ -960,7 +983,6 @@ describe("SyncManager.handleLocalFilesChanged", () => {
     await vi.advanceTimersByTimeAsync(2_000);
     expect(storeHooks.promoted).toContain("i1");
     fakeRegistry.getMapping.mockReturnValue(null);
-    vi.useRealTimers();
   });
 
   it("an unchanged entry still spends the registry's materialized echo", async () => {
@@ -982,7 +1004,6 @@ describe("SyncManager.handleLocalFilesChanged", () => {
     await vi.advanceTimersByTimeAsync(2_000);
     expect(connects.order).toEqual([]);
     fakeRegistry.getMapping.mockReturnValue(null);
-    vi.useRealTimers();
   });
 
   it("an unchanged entry for an UNMAPPED path still asks for a registry pull", async () => {
@@ -998,7 +1019,6 @@ describe("SyncManager.handleLocalFilesChanged", () => {
     expect(sm.hasPendingRegistryPull()).toBe(true);
     await vi.advanceTimersByTimeAsync(300);
     expect(fakeRegistry.pull).toHaveBeenCalledTimes(1);
-    vi.useRealTimers();
   });
 
   it("an unchanged entry does not reopen a permanent failure", async () => {
@@ -1031,7 +1051,6 @@ describe("SyncManager.handleLocalFilesChanged", () => {
 
     fakeRegistry.getMapping.mockReturnValue(null);
     fakeRegistry.pathForDocId.mockReturnValue(null);
-    vi.useRealTimers();
   });
 
   it("an unchanged entry does not clear the `empty everywhere` verdict the file earned", async () => {
@@ -1106,7 +1125,6 @@ describe("SyncManager — a burst of registry frames is ONE pull", () => {
     expect(fakeRegistry.pull).toHaveBeenCalled();
     // …and a handful of times, not once per frame.
     expect(fakeRegistry.pull.mock.calls.length).toBeLessThanOrEqual(6);
-    vi.useRealTimers();
   });
 });
 
@@ -1143,7 +1161,6 @@ describe("SyncManager — leftover CRDT history is reclaimed while idle", () => 
     await vi.advanceTimersByTimeAsync(10_000);
     expect(prune).toHaveBeenCalledTimes(1);
     fakeRegistry.allDocIds.mockReturnValue([]);
-    vi.useRealTimers();
   });
 
   it("arms nothing before the session is live, and nothing after a vault switch", async () => {
@@ -1168,7 +1185,6 @@ describe("SyncManager — leftover CRDT history is reclaimed while idle", () => 
     await vi.advanceTimersByTimeAsync(10_000);
     expect(prune).not.toHaveBeenCalled();
     fakeRegistry.allDocIds.mockReturnValue([]);
-    vi.useRealTimers();
   });
 });
 
@@ -1222,7 +1238,6 @@ describe("SyncManager — disk deletes propagate under a grace window", () => {
     await drain();
     expect(fakeDisk.trashed).toEqual([]);
     expect(fakeRegistry.deletePath).toHaveBeenCalledWith("Notes/Gone.md");
-    vi.useRealTimers();
   });
 
   it("sweeps leftover CRDT history right after a delete drain removed a note", async () => {
@@ -1243,7 +1258,6 @@ describe("SyncManager — disk deletes propagate under a grace window", () => {
     await flush();
     expect(prune).toHaveBeenCalledTimes(1);
     fakeRegistry.allDocIds.mockReturnValue([]);
-    vi.useRealTimers();
   });
 
   it("a `modified` for the same path inside the window CANCELS the delete", async () => {
@@ -1259,7 +1273,6 @@ describe("SyncManager — disk deletes propagate under a grace window", () => {
 
     expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
     expect(fakeDisk.trashed).toEqual([]);
-    vi.useRealTimers();
   });
 
   it("an UNCHANGED `modified` inside the window cancels the delete just the same", async () => {
@@ -1277,7 +1290,6 @@ describe("SyncManager — disk deletes propagate under a grace window", () => {
 
     expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
     expect(fakeDisk.trashed).toEqual([]);
-    vi.useRealTimers();
   });
 
   it("does not propagate when the file is back on disk by drain time", async () => {
@@ -1291,7 +1303,6 @@ describe("SyncManager — disk deletes propagate under a grace window", () => {
     await drain();
 
     expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
-    vi.useRealTimers();
   });
 
   it("never propagates a note whose content this device never confirmed", async () => {
@@ -1306,7 +1317,6 @@ describe("SyncManager — disk deletes propagate under a grace window", () => {
     await drain();
 
     expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
-    vi.useRealTimers();
   });
 
   it("propagates nothing before the session is live", async () => {
@@ -1320,7 +1330,6 @@ describe("SyncManager — disk deletes propagate under a grace window", () => {
     sm.handleLocalFilesChanged([{ path: "Early.md", kind: "removed" }]);
     await drain();
     expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
-    vi.useRealTimers();
   });
 
   it("holds the WHOLE batch for the user when too many notes vanish at once", async () => {
@@ -1354,7 +1363,6 @@ describe("SyncManager — disk deletes propagate under a grace window", () => {
       notes.slice(0, 6).map((n) => n.docId),
     );
     expect(sm.structureNotice().pendingDelete).toEqual({ count: 6 });
-    vi.useRealTimers();
   });
 
   it("refuses an over-cap batch BEFORE it hydrates a single doc", async () => {
@@ -1390,7 +1398,6 @@ describe("SyncManager — disk deletes propagate under a grace window", () => {
     expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
     // …and the whole batch is held for the user, not a prefix of it.
     expect(sm.pendingDeleteDecision()).toHaveLength(30);
-    vi.useRealTimers();
   });
 
   it("keeps every rename in an over-cap window, and refuses only the deletes", async () => {
@@ -1452,7 +1459,6 @@ describe("SyncManager — disk deletes propagate under a grace window", () => {
     // moved (the early check used to report `gone` — 200 — against every
     // renamed note).
     expect(sm.pendingDeleteDecision()).toHaveLength(50);
-    vi.useRealTimers();
   });
 
   it("pairs a rename by content hash instead of deleting and re-registering", async () => {
@@ -1487,7 +1493,6 @@ describe("SyncManager — disk deletes propagate under a grace window", () => {
     expect(fakeDisk.rebinds).toEqual([{ path: "New.md", docId: "d1" }]);
     // …and only then does the pull run.
     expect(fakeRegistry.pull).toHaveBeenCalled();
-    vi.useRealTimers();
   });
 
   it("deletes when the file that appeared is a DIFFERENT note", async () => {
@@ -1509,7 +1514,6 @@ describe("SyncManager — disk deletes propagate under a grace window", () => {
 
     expect(fakeRegistry.renamePath).not.toHaveBeenCalled();
     expect(fakeRegistry.deletePath).toHaveBeenCalledWith("Old.md");
-    vi.useRealTimers();
   });
 
   /** `n` mapped notes, every one confirmed pushed — a vault big enough that the
@@ -1546,7 +1550,6 @@ describe("SyncManager — disk deletes propagate under a grace window", () => {
       notes.slice(0, 30).map((n) => n.relPath),
     );
     expect(fakeDisk.trashed).toEqual([]);
-    vi.useRealTimers();
   });
 
   it("keeps the per-note call below the bulk threshold", async () => {
@@ -1564,7 +1567,6 @@ describe("SyncManager — disk deletes propagate under a grace window", () => {
 
     expect(fakeRegistry.deletePaths).not.toHaveBeenCalled();
     expect(fakeRegistry.deletePath).toHaveBeenCalledTimes(10);
-    vi.useRealTimers();
   });
 
   it("does not consult the recovery-copy writer for intentional disk deletes", async () => {
@@ -1584,7 +1586,6 @@ describe("SyncManager — disk deletes propagate under a grace window", () => {
     expect(fakeRegistry.recordFailure).not.toHaveBeenCalledWith(
       expect.objectContaining({ path: "D7.md" }),
     );
-    vi.useRealTimers();
   });
 
   it("reports a note the server refused, and leaves the rest deleted", async () => {
@@ -1611,7 +1612,6 @@ describe("SyncManager — disk deletes propagate under a grace window", () => {
     const refusals = fakeRegistry.recordFailure.mock.calls.map((c) => c[0] as { path: string });
     expect(refusals).toHaveLength(1);
     expect(refusals[0].path).toBe("D3.md");
-    vi.useRealTimers();
   });
 
   it("takes the OPEN note's provider down with the delete, not just its file", async () => {
@@ -1650,7 +1650,6 @@ describe("SyncManager — disk deletes propagate under a grace window", () => {
     expect(sm.currentSync()).toBeNull();
     // …and nothing opened a replacement for a doc that no longer exists.
     expect(connects.order.filter((d) => d === "d-open")).toHaveLength(1);
-    vi.useRealTimers();
   });
 });
 
@@ -1737,7 +1736,6 @@ describe("SyncManager — structure changes made outside the app (#221)", () => 
     expect(armed).toHaveBeenCalled();
     // …and only then does the deferred pull run.
     expect(fakeRegistry.pull).toHaveBeenCalled();
-    vi.useRealTimers();
   });
 
   it("holds a registry frame's pull while a moved folder is still being paired", async () => {
@@ -1758,7 +1756,6 @@ describe("SyncManager — structure changes made outside the app (#221)", () => 
 
     expect(fakeRegistry.renamePath.mock.calls).toEqual([["Old", "Archive"]]);
     expect(fakeRegistry.pull).toHaveBeenCalled();
-    vi.useRealTimers();
   });
 
   it("holds a registry frame's pull while a renamed NOTE is still inside its grace window", async () => {
@@ -1788,7 +1785,6 @@ describe("SyncManager — structure changes made outside the app (#221)", () => 
     expect(fakeRegistry.renamePath.mock.calls).toEqual([["Old/a.md", "Old/a2.md"]]);
     expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
     expect(fakeRegistry.pull).toHaveBeenCalled();
-    vi.useRealTimers();
   });
 
   it("below 80% it is not a folder move: the notes fall to per-note pairing and the delete drain", async () => {
@@ -1824,7 +1820,6 @@ describe("SyncManager — structure changes made outside the app (#221)", () => 
       "Old/e.md",
       "Old/sub/b.md",
     ]);
-    vi.useRealTimers();
   });
 
   it("a gone folder with nothing new beside it is left to the pull, as before", async () => {
@@ -1839,7 +1834,6 @@ describe("SyncManager — structure changes made outside the app (#221)", () => 
     expect(fakeRegistry.renamePath).not.toHaveBeenCalled();
     expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
     expect(fakeRegistry.pull).toHaveBeenCalled();
-    vi.useRealTimers();
   });
 
   // #266: a folder that holds only binaries (or binaries beside notes) used to
@@ -1883,7 +1877,6 @@ describe("SyncManager — structure changes made outside the app (#221)", () => 
     // No notes to re-index under the new folder.
     expect(fakeDisk.materialized).toEqual([]);
     expect(fakeRegistry.pull).toHaveBeenCalled();
-    vi.useRealTimers();
   });
 
   it("counts binaries beside notes: a mixed folder pairs on their combined evidence (#266)", async () => {
@@ -1904,7 +1897,6 @@ describe("SyncManager — structure changes made outside the app (#221)", () => 
 
     expect(fakeRegistry.renamePath.mock.calls).toEqual([["Old", "Archive"]]);
     expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
-    vi.useRealTimers();
   });
 
   it("binaries below the ratio are not a folder move — left to today's per-file handling", async () => {
@@ -1921,7 +1913,6 @@ describe("SyncManager — structure changes made outside the app (#221)", () => 
 
     expect(fakeRegistry.renamePath).not.toHaveBeenCalled();
     expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
-    vi.useRealTimers();
   });
 
   it("a binary with no agreed base is no evidence: the folder is left to the pull, as before", async () => {
@@ -1939,7 +1930,6 @@ describe("SyncManager — structure changes made outside the app (#221)", () => 
     expect(fakeRegistry.renamePath).not.toHaveBeenCalled();
     expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
     expect(fakeRegistry.pull).toHaveBeenCalled();
-    vi.useRealTimers();
   });
 
   it("an unlistable disk gives the binaries no evidence and changes nothing", async () => {
@@ -1960,7 +1950,6 @@ describe("SyncManager — structure changes made outside the app (#221)", () => 
 
     expect(fakeRegistry.renamePath).not.toHaveBeenCalled();
     expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
-    vi.useRealTimers();
   });
 
   it("a vanished vault root stops everything and raises the reopen banner", async () => {
@@ -1991,7 +1980,6 @@ describe("SyncManager — structure changes made outside the app (#221)", () => 
     expect(sm.pendingDeleteDecision()).toBeNull();
     // The registry's own gates read the same latch.
     expect(await sm.confirmVaultRoot()).toBe(false);
-    vi.useRealTimers();
   });
 
   it("a root that vanishes between the event and the drain is refused silently, never asked", async () => {
@@ -2009,7 +1997,6 @@ describe("SyncManager — structure changes made outside the app (#221)", () => 
     expect(fakeRegistry.deletePaths).not.toHaveBeenCalled();
     expect(sm.pendingDeleteDecision()).toBeNull();
     expect(sm.isVaultRootMissing()).toBe(true);
-    vi.useRealTimers();
   });
 
   it("#228: a deliberate reset never latches the root as missing", async () => {
@@ -2029,7 +2016,6 @@ describe("SyncManager — structure changes made outside the app (#221)", () => 
     // Outside the window the same disk answer latches as before.
     expect(await sm.checkVaultRoot()).toBe(false);
     expect(sm.isVaultRootMissing()).toBe(true);
-    vi.useRealTimers();
   });
 
   it("#228: a local-only vault's vanished root is detected too", async () => {
@@ -2043,7 +2029,6 @@ describe("SyncManager — structure changes made outside the app (#221)", () => 
     await drain(4);
     expect(sm.isVaultRootMissing()).toBe(true);
     expect(notices[notices.length - 1]?.rootMissing).toBe(true);
-    vi.useRealTimers();
   });
 
   it("#228: unsyncedNotePaths names every note the server has not confirmed", async () => {
@@ -2059,7 +2044,6 @@ describe("SyncManager — structure changes made outside the app (#221)", () => 
       all[1].relPath,
     );
     expect(sm.unsyncedNotePaths()).toEqual([all[0].relPath, all[1].relPath].sort());
-    vi.useRealTimers();
   });
 
   describe("a live delete above the cap is held, never propagated, then restored", () => {
@@ -2091,7 +2075,6 @@ describe("SyncManager — structure changes made outside the app (#221)", () => 
       engineHooks.opts!.onRegistryChanged?.();
       await vi.advanceTimersByTimeAsync(600);
       expect(fakeRegistry.pull).toHaveBeenCalled();
-      vi.useRealTimers();
     });
 
     it("never offers a delete: the over-cap batch has no path to the server", async () => {
@@ -2102,7 +2085,6 @@ describe("SyncManager — structure changes made outside the app (#221)", () => 
       await vi.advanceTimersByTimeAsync(60_000);
       expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
       expect(fakeRegistry.deletePaths).not.toHaveBeenCalled();
-      vi.useRealTimers();
     });
 
     it('"Restore now" deletes nothing and lets the pull materialize them again', async () => {
@@ -2118,7 +2100,6 @@ describe("SyncManager — structure changes made outside the app (#221)", () => 
       expect(sm.pendingDeleteDecision()).toBeNull();
       expect(sm.heldDocIds().size).toBe(0);
       expect(fakeRegistry.pull).toHaveBeenCalled();
-      vi.useRealTimers();
     });
 
     it("Dismiss (or the fade) releases the hold: the pull stops skipping them and restores", async () => {
@@ -2136,7 +2117,6 @@ describe("SyncManager — structure changes made outside the app (#221)", () => 
       expect(fakeRegistry.pull).toHaveBeenCalled();
       expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
       expect(fakeRegistry.deletePaths).not.toHaveBeenCalled();
-      vi.useRealTimers();
     });
 
     it("a held note whose file comes back leaves the question", async () => {
@@ -2146,7 +2126,6 @@ describe("SyncManager — structure changes made outside the app (#221)", () => 
       sm.handleLocalFilesChanged([{ path: "X3.md", kind: "modified" }]);
       expect(sm.structureNotice().pendingDelete).toEqual({ count: 29 });
       expect(sm.heldDocIds().has("x3")).toBe(false);
-      vi.useRealTimers();
     });
 
     it("a vault switch forgets the question (a restart restores, the safe direction)", async () => {
@@ -2155,7 +2134,6 @@ describe("SyncManager — structure changes made outside the app (#221)", () => 
       sm.disable();
       expect(sm.pendingDeleteDecision()).toBeNull();
       expect(sm.structureNotice()).toEqual({ rootMissing: false, pendingDelete: null, closedAppChanges: false });
-      vi.useRealTimers();
     });
   });
 
@@ -2170,7 +2148,6 @@ describe("SyncManager — structure changes made outside the app (#221)", () => 
 
     expect(fakeRegistry.deletePath).toHaveBeenCalledTimes(4);
     expect(sm.pendingDeleteDecision()).toBeNull();
-    vi.useRealTimers();
   });
 
   it("shows the closed-app change notice once per open, and only for moved/deleted + new files", async () => {
@@ -2191,7 +2168,6 @@ describe("SyncManager — structure changes made outside the app (#221)", () => 
     fakeRegistry.lastPassDrift.mockReturnValue({ missingMapped: 0, unmappedLocal: 7 });
     await live(sm);
     expect(sm.structureNotice().closedAppChanges).toBe(false);
-    vi.useRealTimers();
   });
 });
 
@@ -2221,7 +2197,6 @@ describe("SyncManager — parked backfills settle wherever a registry pull compl
 
     expect(storeHooks.settles).toEqual([{ mark: 1, placed: [created] }]);
     expect(engineHooks.refreshes).toBe(reconnectsBefore);
-    vi.useRealTimers();
   });
 
   it("places a backfill parked in the prime window once the startup reconcile maps it", async () => {

@@ -106,6 +106,9 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   user. The Cloud note-limit upgrade strip is kept.
 
 ### Security
+- Remove the vulnerable `sprintf-js` dependency (GHSA-hp3w-g68c-fv3c) by overriding
+  Mammoth's CLI parser with `argparse` 2.0.1, which retains its v1 compatibility
+  API without depending on `sprintf-js`. DOCX preview conversion is unchanged.
 - **Dependency updates.** All 40 open Dependabot alerts resolved by bumping `nodemailer` (7 → 9),
   `hono`, `undici`, `vitest`, `@dicebear/initials`, `nanoid`, `postcss`, `browserslist` and
   `baseline-browser-mapping`; no source changes.

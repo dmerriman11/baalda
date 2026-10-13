@@ -36,3 +36,6 @@ ignoredBuiltDependencies:
 overrides:
   dompurify: ">=3.4.16"
   katex: ">=0.18.2"
+  # Mammoth's CLI uses the v1 compatibility API retained in argparse 2.
+  # argparse 1 pulls in unpatched sprintf-js (GHSA-hp3w-g68c-fv3c).
+  "mammoth>argparse": "2.0.1"

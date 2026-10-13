@@ -27,7 +27,7 @@
 - Make a dashboard your Home so it opens with your vault. Start from a template and change it to fit the way you work.
 - Share a dashboard or set a shared Home for your team, so everyone has the same place to return to.
 - Keep it up to date with Claude or Codex, or edit it yourself. Changes sync across your team.
-- Minor bug fixes and improvements to syncing, sharing, and managing members.
+- Minor bug fixes, security updates, and improvements to syncing, sharing, and managing members.
 
 ## 0.1.82
 

@@ -46,12 +46,14 @@ export function resolveHome(personal: string | null, shared: string | null | und
 }
 /** The same effective Home identity drives navigation and dashboard actions. */
 export function effectiveHomeNote(state: {
+  homeSectionHidden?: boolean;
   personalHomeDocId: string | null;
   syncEnabled: boolean;
   session: { activeOrganizationId?: string | null } | null;
   vaultAppearance: Record<string, { homeDocId?: string | null }>;
   titles: readonly { id: string; path: string }[];
 }) {
+  if (state.homeSectionHidden) return undefined;
   const orgId = state.syncEnabled ? state.session?.activeOrganizationId : null;
   const homeId = resolveHome(state.personalHomeDocId, orgId ? state.vaultAppearance[orgId]?.homeDocId : null);
   return state.titles.find((note) => note.id === homeId);
@@ -98,8 +100,10 @@ export function readPersonalPins(vault: string | undefined): PinnedItem[] {
   if (!vault) return [];
   try { return parsePins(JSON.parse(localStorage.getItem(`context.pins:${vault}`) ?? "[]")); } catch { return []; }
 }
-export function readPersonalHome(vault: string | undefined): string | null {
+export function readPersonalHome(vault: string | undefined, hidden = false): string | null {
   if (!vault) return null;
+  // Retire preferences saved before hiding Home also disabled it.
+  if (hidden) { writePersonalHome(vault, null); return null; }
   try { const v = localStorage.getItem(`context.home:${vault}`); return v && ID.test(v) ? v : null; } catch { return null; }
 }
 export function writePersonalPins(vault: string, pins: PinnedItem[]) {

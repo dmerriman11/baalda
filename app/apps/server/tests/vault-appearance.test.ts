@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "../src/http/app.js";
 import { recordingAppDeps } from "./helpers/app.js";
-import { createResolverCache, effectivePermission } from "../src/permissions/resolver.js";
+import { buildAccessContext, createResolverCache, effectivePermission, resolveAccessForUser } from "../src/permissions/resolver.js";
 import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
 import { authHeaders, createOrg, signUp, type TestUser } from "./helpers/auth.js";
@@ -164,7 +164,7 @@ describe("vault appearance", () => {
     expect(saved.settings.pinnedItems.some((item) => item.path === "Work")).toBe(pin.status === 404);
   });
 
-  it("publishes shared Home with ordinary read-only file access and preserves later sharing choices", async () => {
+  it("publishes shared Home with a view grant that preserves existing edit access and later sharing choices", async () => {
     const { owner, admin, member, orgId, vaultId } = await setup();
     await seedVaultGrant(orgId, "edit");
     const folder = await seedFolder(vaultId, null, "Dashboards", "Dashboards");
@@ -176,8 +176,17 @@ describe("vault appearance", () => {
     expect((await patch()).status).toBe(200);
     expect(await (await get(member, orgId)).json()).toMatchObject({ settings: { homeDocId: home } });
     expect((await pool.query("SELECT permission FROM shares WHERE resource_id = $1", [home])).rows)
-      .toEqual([{ permission: "readonly" }]);
-    expect(await effectivePermission(member.userId, home)).toBe("view");
+      .toEqual([{ permission: "view" }]);
+    expect(await effectivePermission(owner.userId, home)).toBe("edit");
+    expect(await effectivePermission(admin.userId, home)).toBe("edit");
+    expect(await effectivePermission(member.userId, home)).toBe("edit");
+    const cache = createResolverCache();
+    await cache.prefetch(pool, [home]);
+    const context = await buildAccessContext("file", home);
+    for (const [person, role] of [[owner, "owner"], [admin, "admin"], [member, "member"]] as const) {
+      expect(await effectivePermission(person.userId, home, pool, cache)).toBe("edit");
+      expect((await resolveAccessForUser(context!, person.userId, role)).permission).toBe("edit");
+    }
     expect(rec.aclBroadcasts).toContain(vaultId);
     expect(rec.disconnected).toContainEqual({ vaultId, docId: home });
     expect(published.at(-1)?.change.settings).toEqual({ homeDocId: home });
@@ -241,7 +250,38 @@ describe("vault appearance", () => {
     expect(await effectivePermission(member.userId, home)).toBe("view");
   });
 
-  it("keeps existing editors while giving an excluded member read-only Home access", async () => {
+  it("allows a member to be granted edit access through the ordinary Access controls after Home is published", async () => {
+    const { owner, admin, member, orgId, vaultId } = await setup();
+    await seedVaultGrant(orgId, "view");
+    const home = await seedNote(vaultId, null, "Home.html", owner.userId);
+    expect((await put(owner, orgId, { homeDocId: home })).status).toBe(200);
+    expect(await effectivePermission(member.userId, home)).toBe("view");
+    const access = await app.request(`/api/orgs/${orgId}/access/bulk`, {
+      method: "POST", headers: { ...authHeaders(owner), "content-type": "application/json" },
+      body: JSON.stringify({ resources: [{ resourceType: "file", resourceId: home }],
+        audience: { type: "users", userIds: [member.userId] }, mode: "open" }),
+    });
+    expect(access.status).toBe(200);
+    expect(await effectivePermission(member.userId, home)).toBe("edit");
+    expect(await effectivePermission(admin.userId, home)).toBe("view");
+    expect((await put(owner, orgId, { homeDocId: home })).status).toBe(200);
+    expect(await effectivePermission(member.userId, home)).toBe("edit");
+  });
+
+  it.each(["readonly", "locked"])("preserves an explicitly chosen %s file restriction when publishing Home", async (permission) => {
+    const { owner, admin, member, orgId, vaultId } = await setup();
+    await seedVaultGrant(orgId, "edit");
+    const home = await seedNote(vaultId, null, "Home.html", owner.userId);
+    await pool.query(
+      `INSERT INTO shares (id, org_id, resource_type, resource_id, principal_type, principal_id, permission)
+       VALUES ('explicit-lock', $1, 'file', $2, 'org', $1, $3)`, [orgId, home, permission],
+    );
+    expect((await put(owner, orgId, { homeDocId: home })).status).toBe(200);
+    for (const person of [owner, admin, member]) expect(await effectivePermission(person.userId, home)).toBe("view");
+    expect((await pool.query("SELECT permission FROM shares WHERE id = 'explicit-lock'")).rows).toEqual([{ permission }]);
+  });
+
+  it("keeps existing editors while giving an excluded member view-only Home access", async () => {
     const { owner, admin, member, orgId, vaultId } = await setup();
     await seedVaultGrant(orgId, "edit");
     const home = await seedNote(vaultId, null, "Home.html", owner.userId);
@@ -255,6 +295,15 @@ describe("vault appearance", () => {
     expect(await effectivePermission(member.userId, home)).toBe("view");
     const rows = await pool.query("SELECT principal_id FROM shares WHERE resource_id = $1", [home]);
     expect(rows.rows).toEqual([{ principal_id: member.userId }]);
+    const edit = await app.request(`/api/orgs/${orgId}/access/bulk`, {
+      method: "POST", headers: { ...authHeaders(owner), "content-type": "application/json" },
+      body: JSON.stringify({ resources: [{ resourceType: "file", resourceId: home }],
+        audience: { type: "users", userIds: [member.userId] }, mode: "open" }),
+    });
+    expect(edit.status).toBe(200);
+    expect(await effectivePermission(member.userId, home)).toBe("edit");
+    expect((await put(owner, orgId, { homeDocId: home })).status).toBe(200);
+    expect(await effectivePermission(member.userId, home)).toBe("edit");
   });
 
   it("rejects a Home reference outside the vault without publishing or changing access", async () => {

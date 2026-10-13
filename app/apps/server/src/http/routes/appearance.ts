@@ -136,10 +136,12 @@ export function createAppearanceRoutes(deps: AccessChangeDeps = {}): Hono {
           await db.query("ROLLBACK");
           return c.json({ error: "note_not_found" }, 404);
         }
+        // A view grant adds visibility without locking owners, admins or
+        // existing editors. Explicit readonly/locked shares still apply.
         const inserted = await db.query(
           `INSERT INTO shares (id, org_id, resource_type, resource_id, principal_type,
                                principal_id, permission, created_by, access_revision)
-           SELECT $1, $2, 'file', $3, 'org', $2, 'readonly', $4, $5
+           SELECT $1, $2, 'file', $3, 'org', $2, 'view', $4, $5
             WHERE NOT EXISTS (SELECT 1 FROM shares WHERE org_id = $2
               AND resource_type = 'file' AND resource_id = $3)
               AND NOT EXISTS (SELECT 1 FROM vault_appearance WHERE organization_id = $2

@@ -22,6 +22,9 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   (#228).
 
 ### Fixed
+- Hiding Home unsets the personal Home and disables Home startup/navigation on
+  this device. Publishing vault Home adds view access without imposing a lock
+  on owners, admins or existing editors; ordinary Access controls remain in charge.
 - Shared Home and pins resolve canonical synced identities, recover missed updates on reconnect,
   and follow changes while viewing the shared Home. Publishing Home waits for content sync and
   atomically adds the normal read-only file share when no explicit file permissions exist.

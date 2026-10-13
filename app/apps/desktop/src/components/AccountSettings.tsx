@@ -550,7 +550,7 @@ function AppearanceTab() {
     <>
     <label className="menu-row toggle-row">
       <span className="menu-row-label">Show Home section
-        <span className="field-hint">Keep Home in the sidebar on this device.</span>
+        <span className="field-hint">Turning this off unsets your Home and stops it opening at startup on this device.</span>
       </span>
       <Switch checked={!homeSectionHidden} ariaLabel="Show Home section"
         onChange={(show) => useStore.getState().setHomeSectionHidden(!show)} />

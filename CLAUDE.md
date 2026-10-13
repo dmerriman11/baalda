@@ -975,10 +975,12 @@ Shared Home and pins use the vault appearance channel with stable note IDs, not
 separate dashboard identities. Shared references are registered before publishing;
 clients resolve delayed references through the registry/index and refresh defaults
 on reconnect. An active shared Home follows a changed vault Home; an ordinary open
-file or personal Home does not. Publishing Home waits for the normal note upload
-before applying its default read-only file share. That default uses the existing
-org-wide cap (including managers); owners/admins can change it through normal
-sharing controls. Publishing Home also ensures every current member can read
+file or personal Home does not. Hiding Home unsets the device's personal Home and
+disables effective Home navigation and startup while hidden, including inherited
+vault Home; the team's shared setting stays intact. Publishing Home waits for the
+normal note upload before applying its default view grant, which preserves existing editing access
+and adds no lock. Owners/admins can change it through normal sharing controls.
+Publishing Home also ensures every current member can read
 that file: an excluded member receives a normal per-user read-only file share,
 overriding file/ancestor restrictions only for Home. Existing view/edit access,
 parent-folder permissions and sibling files remain unchanged. The permission and

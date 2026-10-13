@@ -48,6 +48,8 @@ describe("personal and vault navigation", () => {
     expect(effectiveHomeNote({ ...state, personalHomeDocId: "mine" })).toEqual(personal);
     expect(effectiveHomeNote({ ...state, syncEnabled: false })).toBeUndefined();
     expect(effectiveHomeNote({ ...state, personalHomeDocId: "missing" })).toBeUndefined();
+    expect(effectiveHomeNote({ ...state, homeSectionHidden: true })).toBeUndefined();
+    expect(effectiveHomeNote({ ...state, personalHomeDocId: "mine", homeSectionHidden: true })).toBeUndefined();
   });
   it("toggles a repeated Home activation and collapses a fresh or different Home visit", () => {
     const first = "/vault/home/Home.html:1";

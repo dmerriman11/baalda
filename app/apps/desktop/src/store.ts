@@ -2107,7 +2107,15 @@ export const useStore = create<AppStore>((set, get) => ({
   homeSectionHidden: readHomeSectionHidden(),
   setHomeSectionHidden: (hidden) => {
     writeHomeSectionHidden(hidden);
-    set({ homeSectionHidden: hidden });
+    const state = get();
+    if (hidden && state.vault) writePersonalHome(state.vault.path, null);
+    set({ homeSectionHidden: hidden,
+      ...(hidden ? { personalHomeDocId: null, homePickerOpen: false,
+        homeLandingPending: false, homeNavigationPath: null, homeActivation: null,
+        ...(state.homeNavigationPath && state.openingNotePath === state.homeNavigationPath
+          ? { openingNotePath: null } : {}),
+      } : {}),
+    });
   },
   appearanceOverrides: readAppearanceOverrides(null),
   vaultAppearance: {},
@@ -2183,6 +2191,7 @@ export const useStore = create<AppStore>((set, get) => ({
     if (path && sameVault(get, epoch)) get().setHomeSectionHidden(false);
   },
   openHome: async (pickerIfMissing = true, fullscreen = false) => {
+    if (get().homeSectionHidden) return false;
     const target = effectiveHomeNote(get());
     if (target) {
       const vault = get().vault;
@@ -2191,7 +2200,7 @@ export const useStore = create<AppStore>((set, get) => ({
       await get().openNoteByPath(target.path, "home");
       // Full width is an explicit sidebar Home action, never ordinary navigation.
       // Failed/superseded opens must not change the layout of another note.
-      if (fullscreen && vault && get().vault?.path === vault.path && get().vault?.epoch === vault.epoch &&
+      if (fullscreen && !get().homeSectionHidden && vault && get().vault?.path === vault.path && get().vault?.epoch === vault.epoch &&
           get().openNote?.path === target.path && !get().activeVirtualTab && !get().openingNotePath) {
         set({ homeActivation: { vaultPath: vault.path, path: target.path,
           revision } });
@@ -2217,7 +2226,7 @@ export const useStore = create<AppStore>((set, get) => ({
     set({
       vault: v,
       personalPins: readPersonalPins(v?.path),
-      personalHomeDocId: readPersonalHome(v?.path),
+      personalHomeDocId: readPersonalHome(v?.path, get().homeSectionHidden),
       homePickerOpen: false,
       ...(switched ? { homeLandingPending: true, homeActivation: null, homeNavigationPath: null } : {}),
       itemColors: readItemColors(v?.path),
@@ -4604,7 +4613,7 @@ export const useStore = create<AppStore>((set, get) => ({
     set({
       vault: info,
       personalPins: readPersonalPins(info.path),
-      personalHomeDocId: readPersonalHome(info.path),
+      personalHomeDocId: readPersonalHome(info.path, get().homeSectionHidden),
       homePickerOpen: false,
       homeLandingPending: true,
       homeNavigationPath: null,
@@ -4725,7 +4734,7 @@ export const useStore = create<AppStore>((set, get) => ({
     set({
       vault: v,
       personalPins: readPersonalPins(v.path),
-      personalHomeDocId: readPersonalHome(v.path),
+      personalHomeDocId: readPersonalHome(v.path, get().homeSectionHidden),
       homePickerOpen: false,
       homeLandingPending: true,
       homeNavigationPath: null,

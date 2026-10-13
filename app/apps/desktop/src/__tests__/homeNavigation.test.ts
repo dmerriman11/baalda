@@ -5,7 +5,7 @@ import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 
 vi.mock("../lib/auth/authManager", () => ({ authManager: { getServerUrl: () => "http://localhost:3010", api: { patchVaultAppearance: vi.fn(), toggleVaultPin: vi.fn() } }, api: {} }));
-vi.mock("../lib/sync/docSession", () => ({ syncManager: { handleRegistryChanged: vi.fn(), prepareSharedHome: vi.fn(), registry: { registerNote: vi.fn(), registerFolder: vi.fn() } } }));
+vi.mock("../lib/sync/docSession", () => ({ syncManager: { isSyncable: () => false, handleRegistryChanged: vi.fn(), prepareSharedHome: vi.fn(), registry: { registerNote: vi.fn(), registerFolder: vi.fn() } } }));
 vi.mock("../lib/bridge", () => ({ bridgeManager: {} }));
 vi.mock("../components/FileTree", () => ({ iconForPath: () => null, SidebarPresence: () => null }));
 import { useStore } from "../store";
@@ -13,6 +13,8 @@ import { authManager } from "../lib/auth/authManager";
 import { syncManager } from "../lib/sync/docSession";
 import { HomeSection, PinnedSection } from "../components/HomeNavigation";
 import { readHomeSectionHidden } from "../lib/prefs";
+import { readPersonalHome, writePersonalHome, effectiveHomeNote } from "../lib/pins";
+import * as ipc from "../lib/ipc";
 
 const vault = { path: "/vault", name: "Vault", epoch: 1 };
 const home = { id: "home", path: "Start here.md", title: "Start here" };
@@ -38,7 +40,7 @@ beforeEach(() => {
     }),
   });
 });
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe("Home navigation", () => {
   it("reveals the section when assigning even the existing Home, without expanding the page", async () => {
@@ -48,14 +50,67 @@ describe("Home navigation", () => {
     expect(readHomeSectionHidden()).toBe(false);
     expect(useStore.getState().homeActivation).toBeNull();
   });
-  it("hides and restores the section without unsetting Home, and persists the preference", () => {
+  it("unsets personal Home when hidden and keeps it unset when the section is shown again", () => {
+    writePersonalHome(vault.path, home.id);
     useStore.getState().setHomeSectionHidden(true);
     expect(readHomeSectionHidden()).toBe(true);
     expect(renderHome()).toBe("");
-    expect(useStore.getState().personalHomeDocId).toBe(home.id);
+    expect(useStore.getState().personalHomeDocId).toBeNull();
+    expect(readPersonalHome(vault.path)).toBeNull();
     useStore.getState().setHomeSectionHidden(false);
     expect(readHomeSectionHidden()).toBe(false);
+    expect(renderHome()).toContain("Set a home");
+  });
+  it("retires an older saved personal Home when loading a vault with Home hidden", () => {
+    writePersonalHome(vault.path, home.id);
+    expect(readPersonalHome(vault.path, true)).toBeNull();
+    expect(readPersonalHome(vault.path)).toBeNull();
+  });
+  it.each([false, true])("does not land on personal or shared Home after refreshing with the section hidden (shared: %s)", async (shared) => {
+    useStore.setState({ homeSectionHidden: true, homeLandingPending: true,
+      personalHomeDocId: shared ? null : home.id,
+      syncEnabled: shared, session: shared ? { user: { id: "me" }, activeOrganizationId: "org" } as never : null,
+      vaultAppearance: { org: { homeDocId: home.id } }, loadVaultAppearance: vi.fn(async () => {}),
+    });
+    expect(effectiveHomeNote(useStore.getState())).toBeUndefined();
+    await useStore.getState().openWelcomeIfPresent();
+    expect(useStore.getState().openNoteByPath).not.toHaveBeenCalled();
+    expect(useStore.getState().homeLandingPending).toBe(false);
+    expect(await useStore.getState().openHome()).toBe(false);
+    expect(useStore.getState().homePickerOpen).toBe(false);
+  });
+  it("disables shared Home locally without publishing a change to the team", async () => {
+    const patch = vi.mocked(authManager.api.patchVaultAppearance);
+    patch.mockClear();
+    useStore.setState({ syncEnabled: true, personalHomeDocId: null,
+      session: { user: { id: "me" }, activeOrganizationId: "org" } as never,
+      vaultAppearance: { org: { homeDocId: home.id } },
+      homeNavigationPath: home.path, openNote: home,
+      homeActivation: { vaultPath: vault.path, path: home.path, revision: 1 },
+    });
+    useStore.getState().setHomeSectionHidden(true);
+    expect(useStore.getState().vaultAppearance.org.homeDocId).toBe(home.id);
+    expect(useStore.getState().homeNavigationPath).toBeNull();
+    expect(useStore.getState().homeActivation).toBeNull();
+    expect(patch).not.toHaveBeenCalled();
+    useStore.setState({ openNote: null, homeLandingPending: true });
+    useStore.getState().receiveVaultAppearance("org", { homeDocId: home.id });
+    expect(useStore.getState().openNoteByPath).not.toHaveBeenCalled();
+    useStore.getState().setHomeSectionHidden(false);
     expect(renderHome()).toContain("Start here");
+  });
+  it("cancels a Home open still reading metadata when the section is hidden", async () => {
+    let finish!: (value: ipc.NoteMeta | null) => void;
+    vi.spyOn(ipc, "getNoteMeta").mockReturnValue(new Promise((resolve) => { finish = resolve; }));
+    useStore.setState({ openNoteByPath: initial.openNoteByPath });
+    const opening = useStore.getState().openHome(true, true);
+    expect(useStore.getState().openingNotePath).toBe(home.path);
+    useStore.getState().setHomeSectionHidden(true);
+    finish(null);
+    await opening;
+    expect(useStore.getState().openNote).toBeNull();
+    expect(useStore.getState().openingNotePath).toBeNull();
+    expect(useStore.getState().homeActivation).toBeNull();
   });
   it("collapses only for explicit sidebar Home activations", async () => {
     await useStore.getState().openHome();

@@ -44,6 +44,14 @@ The sidebar's labeled Home section shows that effective Home note above Pinned,
 or offers Set a home when it is unavailable. That action opens the template
 dialog; creating a dashboard and choosing Set as my home remain explicit steps.
 Home navigation lives in the sidebar; there is no duplicate top-bar Home icon.
+
+Hiding the Home section (or turning off Show Home section in Account Settings)
+unsets this device's personal Home and disables Home startup, keyboard navigation,
+and dashboard Home actions while hidden. Shared vault Home settings stay intact
+for teammates. Showing the section again offers Set a home or the shared vault
+Home; choosing a Home explicitly shows the section again. Older saved personal
+Home choices are cleared when a vault opens with Home hidden.
+
 Startup and explicit Home navigation highlight only this shortcut, without
 revealing or expanding the source file in Notes. Opening that file directly
 restores ordinary file selection and folder reveal.
@@ -60,9 +68,11 @@ the personal override reveals the shared Home. Vault owners/admins can also
 Unset vault Home for everyone; members cannot clear the shared setting.
 
 Setting Vault Home automatically makes the chosen file readable to every current
-vault member, without another prompt. Members excluded by file, folder, or vault
-permissions receive a read-only share on that file. Existing view/edit access is
-preserved; the parent folder and other files are not shared. These remain normal
+vault member, without another prompt. Home adds ordinary view grants rather than
+a lock, so existing editing access (including owner/admin access) is preserved.
+Members excluded by file, folder, or vault permissions receive a read-only share
+on that file. Existing view/edit access is preserved; the parent folder and other
+files are not shared. These remain normal
 editable permissions, not a Home-only authorization bypass. Setting Home again
 restores read access for anyone excluded since it was last set.
 

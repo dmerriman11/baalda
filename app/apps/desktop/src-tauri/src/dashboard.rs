@@ -67,6 +67,9 @@ pub fn handle_request<R: tauri::Runtime>(
 }
 
 const TEMPLATE_IDS: &[&str] = &[
+    "orbit-agentic-os",
+    "waystation-agentic-os",
+    "meridian-agentic-os",
     "startbootstrap-sb-admin",
     "material-dashboard-v3",
     "mazer",

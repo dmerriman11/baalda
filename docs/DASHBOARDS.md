@@ -263,12 +263,29 @@ available. Browser simulation covers the host layout only, not native rendering.
 
 ### Imported template library and previews
 
-The library contains 20 original upstream dashboard templates. Bundled HTML,
+The library contains 20 upstream dashboard templates and three original Baalda
+Agentic OS templates: Orbit, Waystation, and Meridian. Bundled HTML,
 styles, scripts, fonts and images live in `app/apps/desktop/public/dashboard-templates/`.
 `SOURCES.json` records repositories, revisions, source-page hashes and final artifact
-hashes; adjacent license files retain attribution. These are imported designs, not
-Baalda recreations. Legacy personal starter files remain in source but are not in
-this imported catalog.
+hashes for the upstream imports; adjacent license files retain attribution. The
+20 imports preserve their upstream designs. Legacy personal starter files remain
+in source but are not in this catalog.
+
+Orbit is a self-contained HTML note with Command, Missions, Skills, Memory,
+Signals and Activity pages. It includes dark/light themes, an original Canvas
+particle sculpture, sample reports and session-only simulated skill runs. Its
+`DEMO` object is the customization entry point. It makes no network requests,
+launches no agents and does not modify vault data. Saved copies start in dark mode
+regardless of the host theme; the user can choose light mode for that visit. Animation uses a single
+timestamp-based `requestAnimationFrame` loop, precomputed edges, capped pixel
+density, visibility gating and the system reduced-motion preference; a pause
+control is also available. Fonts and their OFL notices are embedded in the HTML.
+
+Design research: the [Agentic OS walkthrough](https://www.youtube.com/watch?v=EOdXR6lU5ZA)
+informed the separation of workflows, knowledge and outputs. Orbit is an original
+implementation, not a copy of its UI or source. Animation decisions follow
+[MDN performance guidance](https://developer.mozilla.org/en-US/docs/Web/Performance/Guides/Fundamentals)
+and [reduced-motion support](https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/At-rules/%40media/prefers-reduced-motion).
 
 Gallery cards use 900 × 900 WebP screenshots in `public/dashboard-thumbnails/`.
 They are captured from the corresponding bundled HTML at a 1200 × 1200 viewport,
@@ -319,3 +336,36 @@ its draft and any running update. Chat and Activity replace each other. Sending 
 message clears the composer immediately; the next draft stays editable and survives
 completion. Paper and Material templates receive a scoped 24px top inset in both
 new templates and rendered saved copies; rendering does not rewrite vault files.
+
+
+### Waystation and Meridian
+
+Alongside Orbit, the Agentic OS category includes two more original Apache-2.0
+HTML templates. All three start dark independently of the host and have an explicit
+light-mode toggle. Their sample interactions last for the current visit only.
+
+- **Waystation** is an original SVG isometric studio: six selectable stations,
+  four walking couriers, a work queue, routine toggles, and a searchable archive.
+  A demo request clears the composer, moves through draft/review, and adds a sample
+  artifact. Selecting either a desk or a roster entry selects the same station.
+- **Meridian** organizes apps, routines, memory, and skills around an interactive
+  artifact atlas. It includes a sample calendar and inbox, live timezone clocks,
+  a filtered artifact library, memory collections, agent/effort selectors and
+  simulated skill runs that add reviewable outputs.
+
+Neither template executes agents, schedules background tasks, connects accounts,
+changes permissions, or sends network requests. Their `DEMO` objects and top-of-file
+comments are the customization entry points. Both embed their fonts and license
+notices. Motion can be paused, respects reduced-motion settings, and stops when
+hidden or out of view. Waystation uses a timestamp-based animation loop; Meridian
+uses CSS transforms for its orbital markers.
+
+Concept research: the user-provided isometric workspace screenshot and
+[the RoboNuggets Agentic OS walkthrough](https://www.youtube.com/watch?v=8NSyI-npJCU),
+reviewed through its full transcript and dashboard visuals. The four-part structure
+informed Meridian; the artwork, names, layouts, code and sample content are original.
+
+The shared template-spacing stylesheet also restores symmetric responsive gutters
+for Star Admin, Purple Admin, Majestic, Sneat, and PlainAdmin. Majestic's header,
+tabs, report button and charts share the same outer inset. The native renderer
+injects the current rules into saved templates without rewriting the vault file.

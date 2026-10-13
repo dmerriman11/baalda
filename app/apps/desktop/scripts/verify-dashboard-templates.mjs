@@ -9,7 +9,7 @@ const require = createRequire(import.meta.url);
 const postcss = createRequire(require.resolve('vite'))('postcss');
 const directory = new URL('../public/dashboard-templates/', import.meta.url);
 const files = readdirSync(directory).filter((name) => name.endsWith('.html'));
-assert.equal(files.length, 20);
+assert.equal(files.length, 23);
 let styles = 0, scripts = 0;
 for (const file of files) {
   const source = readFileSync(new URL(file, directory), 'utf8');

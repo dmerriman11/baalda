@@ -23,6 +23,7 @@
 
 ## 0.1.82
 
+- Agentic OS templates: explore Orbit’s animated command center, Waystation’s isometric studio, and Meridian’s personal workspace. All start dark, include light mode, and come with sample data.
 - Pinned rows have an Unpin menu. The Access board can unlock conflicting Everyone rules before allowing edits. Dashboard templates have more room along their sides.
 - Shared Home and pins update without a refresh. Setting Vault Home automatically gives excluded members read-only access to its file. Synced dashboards refresh when their content arrives.
 - Home and pins: choose any note as your Home and keep notes or folders close. Vault admins can also set a shared Home and pins for everyone.

@@ -29060,6 +29060,15 @@ html:has(meta[name="baalda-template"][content="material-dashboard-v3"]) .main-co
 html:has(meta[name="baalda-template"][content="argon-dashboard"]) .main-content > .container-fluid.py-4,
 html:has(meta[name="baalda-template"][content="soft-ui-dashboard"]) .main-content > .container-fluid.py-4,
 html:has(meta[name="baalda-template"][content="material-dashboard-v3"]) .main-content > .container-fluid.py-2 { padding-inline:clamp(16px, 2vw, 24px) !important; }
+
+/* These content containers lost their left gutter with the upstream sidebar. */
+html:has(meta[name="baalda-template"][content="StarAdmin-Free-Bootstrap-Admin-Template"]) .main-panel > .content-wrapper,
+html:has(meta[name="baalda-template"][content="PurpleAdmin-Free-Admin-Template"]) .main-panel > .content-wrapper,
+html:has(meta[name="baalda-template"][content="MajesticAdmin-Free-Bootstrap-Admin-Template"]) .main-panel > .content-wrapper,
+html:has(meta[name="baalda-template"][content="sneat-html-admin-template-free"]) .content-wrapper > .container-xxl.container-p-y,
+html:has(meta[name="baalda-template"][content="plainadmin"]) .main-wrapper > .section > .container-fluid {
+  padding-inline:clamp(20px, 2.5vw, 40px) !important;
+}
 </style></head>
 <body class="g-sidenav-show bg-gray-100">
 <div class="min-height-300 bg-dark position-absolute w-100"></div>

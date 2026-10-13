@@ -4,6 +4,7 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { DashboardTemplateGallery } from "../DashboardTemplateGallery";
+import { DASHBOARD_TEMPLATES } from "../../lib/dashboard/templates";
 
 vi.mock("../VaultDashboardPreview", () => ({ VaultDashboardPreview: ({ path }: { path: string }) => createElement("iframe", { title:path }) }));
 let host: HTMLDivElement, root: Root;
@@ -22,7 +23,7 @@ afterEach(() => { act(() => root.unmount()); host.remove(); vi.unstubAllGlobals(
 it("lists all templates as lazy images without starting dashboard scripts, then mounts only the clicked preview", async () => {
   const fetch = vi.fn(); vi.stubGlobal("fetch", fetch);
   await act(async () => root.render(createElement(DashboardTemplateGallery, { onUse:vi.fn() })));
-  expect(host.querySelectorAll("img[loading='lazy']")).toHaveLength(20);
+  expect(host.querySelectorAll("img[loading='lazy']")).toHaveLength(DASHBOARD_TEMPLATES.length);
   expect(host.querySelectorAll("iframe")).toHaveLength(0);
   expect(fetch).not.toHaveBeenCalled();
   await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Show preview of Tabler"]')!.click());

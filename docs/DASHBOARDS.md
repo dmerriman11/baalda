@@ -263,13 +263,27 @@ available. Browser simulation covers the host layout only, not native rendering.
 
 ### Imported template library and previews
 
-The library contains 20 upstream dashboard templates and three original Baalda
-Agentic OS templates: Orbit, Waystation, and Meridian. Bundled HTML,
+The library contains 26 templates: 20 upstream dashboard templates, three original
+Baalda Agentic OS templates (Orbit, Waystation, and Meridian), and three adapted
+user-supplied deployments (Cosmos, Sales OS, and Marketing OS). Bundled HTML,
 styles, scripts, fonts and images live in `app/apps/desktop/public/dashboard-templates/`.
 `SOURCES.json` records repositories, revisions, source-page hashes and final artifact
 hashes for the upstream imports; adjacent license files retain attribution. The
 20 imports preserve their upstream designs. Legacy personal starter files remain
 in source but are not in this catalog.
+
+The three deployment adaptations retain the supplied interfaces and replace the
+original business/customer data with fictional sample workspaces. `DEPLOYMENTS.json`
+records source URLs and hashes; `deployed-os-NOTICE.txt` records attribution and
+bundled dependency licenses. Cosmos preserves the orbital graph, search, inspectors,
+briefing, radar, and command console. Sales OS has seven sections with call briefs,
+pipeline charts, decisions, context, and playbooks. Marketing OS has ten pages,
+six palettes, and the original canvas core. They make no network requests and do
+not connect to the original services. Demo decisions, captures, and tasks last for
+the current visit only. Playbook actions display copyable prompts for use with a
+separately configured agent. Cosmos and Marketing OS start dark; Sales OS starts
+light. Each includes an explicit theme control. Reduced-motion preferences and
+motion controls are preserved.
 
 Orbit is a self-contained HTML note with Command, Missions, Skills, Memory,
 Signals and Activity pages. It includes dark/light themes, an original Canvas

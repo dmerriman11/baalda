@@ -860,6 +860,28 @@ describe("inbound folder deletion", () => {
     expect(disk.folders.has("Team")).toBe(false);
   });
 
+  it("re-registers a deleted folder whose removal failed once the user adds a note to it", async () => {
+    const disk = new FakeDisk();
+    disk.folders.add("Team");
+    const { api, reg } = await twoPasses({
+      disk,
+      first: { notes: [], folders: [{ id: "f1", path: "Team" }] },
+      then: { notes: [], folders: [], folderTombstones: ["f1"] },
+      // A lasting I/O failure (Windows lock, EACCES): every removal throws.
+      patch: () => vi.mocked(ipc.deleteFolderIfEmpty).mockRejectedValue(new Error("access denied")),
+    });
+    expect(api.createFolder).not.toHaveBeenCalled();
+    // The user writes a note into the folder the teammate deleted.
+    disk.notes.set("Team/new.md", "local");
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    expect(api.createFolder).toHaveBeenCalledWith(expect.objectContaining({ path: "Team" }));
+    expect(api.createNote).toHaveBeenCalledWith(expect.objectContaining({ relPath: "Team/new.md" }));
+    // Once kept, the folder is no longer a pending removal.
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+    const cfg = JSON.parse(writes[writes.length - 1][0] as string);
+    expect(cfg.revokedFolders?.Team).toBeUndefined();
+  });
+
   it("removes an emptied local folder the server deleted and does not re-register it", async () => {
     // THE reappearing-folder bug, end to end: without a tombstone this device
     // saw "missing from the server" and re-registered the folder, resurrecting

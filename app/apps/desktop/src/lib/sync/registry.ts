@@ -4091,11 +4091,41 @@ export class VaultRegistry {
       }
     }
     // A pending folder that is listed again or left the disk no longer needs
-    // removal. A tombstoned identity stays pending when disk removal failed.
+    // removal. A tombstoned identity stays pending when disk removal failed —
+    // until the folder holds NEW local work (a note no server row accounts
+    // for, e.g. one the user made after the failed removal). That folder can
+    // no longer be emptied, so keep it: drop the dead id so the folder is
+    // re-registered below and the note inside it can register too. Without
+    // this the server refused every note in it ("No folder at …") forever.
+    // Only judged after an inbound pass, which is what fills
+    // `inboundSuppressed` with the deleted notes still on disk.
+    const newLocalWork = (rp: string): boolean => {
+      const prefix = pathKey(rp) + "/";
+      return notes.some(
+        (n) =>
+          pathKey(n.path).startsWith(prefix) &&
+          !this.byPath.has(n.path) &&
+          !this.inboundSuppressed.has(n.path) &&
+          !this.deletedPaths.has(pathKey(n.path)) &&
+          !this.isOwnDelete(n.path),
+      );
+    };
     for (const [rp, id] of [...this.revokedFolders]) {
-      if (listedFolderIds.has(id) || !onDiskFoldersCi.has(pathKey(rp))) {
+      const kept =
+        opts.inbound === true &&
+        deadFolderIds.has(id) &&
+        onDiskFoldersCi.has(pathKey(rp)) &&
+        newLocalWork(rp);
+      if (listedFolderIds.has(id) || !onDiskFoldersCi.has(pathKey(rp)) || kept) {
         this.revokedFolders.delete(rp);
         this.persist();
+        if (kept) {
+          reconcileReport.record({
+            kind: "folderKept",
+            path: rp,
+            detail: "deleted by a teammate, kept because it still holds notes created here",
+          });
+        }
       }
     }
     // The path we keep is the one on DISK: every other lookup in this class is

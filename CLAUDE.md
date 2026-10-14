@@ -482,11 +482,13 @@ views, persisted per device in localStorage `context.memberAccess.view`: **List*
 checkbox tree with the "Across the vault" level) and **Board** (default; `MemberAccessBoard.tsx`, the same
 bulk-access writes, one resource per write): columns Can edit / Can view / No access, rows moved by
 drag-and-drop or arrows, grey ancestor rows showing only the path (up to 5 levels), a "Set
-everything to" menu with Reset to vault default and per-column Add all / Remove all. A single-row
+everything to" menu with Reset to vault default and per-column Add all / Remove all. Add all targets
+existing item roots (including their folder subtrees), never the vault resource; future root items
+keep the vault's existing default. An empty item selection is a no-op. A single-row
 move applies at once with no confirm and no undo; the app's standard toast states the result
 ("Sara can now view X."). **Confirms are for destructive changes only**, i.e. a target of No access
 (`private`): the Everyone row, a person's vault-wide level, a List row/note change, the board's Set
-everything to → No access, Remove all and Reset to vault default. Can view, Can edit, Add all, Set
+everything to → No access, Add all → No access, Remove all and Reset to vault default. Can view, Can edit, Set
 everything to → Can view and the New members row never confirm. Access levels are colour-coded
 everywhere (List and Members-table pills, board column headers, drag highlight, landing pulse):
 Can edit green, Can view amber, No access grey, Custom/Mixed neutral, from `--access-{edit,view,none}-{bg,fg}`

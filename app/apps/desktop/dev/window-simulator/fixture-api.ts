@@ -245,8 +245,8 @@ const publicLinks = new Map<string, any>();
 const access = new Map<string, string>();
 const allResources = () => [...folders, ...notes, ...files];
 function modeFor(userId: string, id: string): string {
-  if (userId === users[0].id || userId === users[1].id) return "open";
   if (access.has(userId + ":" + id)) return access.get(userId + ":" + id)!;
+  if (userId === users[0].id || userId === users[1].id) return "open";
   if (userId === users[2].id) return id === notes[1].id ? "private" : "open";
   if (userId === users[3].id)
     return id === notes[1].id ? "private" : "readonly";
@@ -435,9 +435,15 @@ export async function previewFetch(
     return ok({ mode: joinMode });
   }
   if (p.endsWith("/access/bulk")) {
-    for (const r of body.resources ?? [])
+    for (const r of body.resources ?? []) {
+      const folder = folders.find((f) => r.resourceType === "folder" && f.id === r.resourceId);
+      const targets = folder ? allResources().filter((item) => {
+        const path = "relPath" in item ? item.relPath : item.path;
+        return path === folder.path || path.startsWith(folder.path + "/");
+      }) : [{ id: r.resourceId }];
       for (const uid of body.audience?.userIds ?? users.map((u) => u.id))
-        access.set(uid + ":" + r.resourceId, body.mode);
+        for (const target of targets) access.set(uid + ":" + target.id, body.mode);
+    }
     return ok({
       mode: body.mode,
       resourcesChanged: body.resources.length,

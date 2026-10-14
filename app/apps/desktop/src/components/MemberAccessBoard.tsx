@@ -84,7 +84,7 @@ export interface MemberAccessBoardProps {
   personVaultMode: TeamAccessMode | "custom" | null;
   /** One folder or note was written. */
   onItemWritten: () => void;
-  /** A vault-wide change (Set everything to, Add all, Reset). */
+  /** A vault-wide change (Set everything to, Reset). */
   onChanged: () => Promise<void>;
   /** The host already shows a vault-wide control: skip "Set everything to". */
   hideSetEverything?: boolean;
@@ -312,12 +312,15 @@ export function MemberAccessBoard({
   const fullName = member.name || member.email || member.userId;
 
   /**
-   * One bulk write for this person. `rows` empty = the vault resource.
+   * One bulk write for this person. `null` explicitly targets the vault;
+   * an empty item selection must never become a vault-wide permission change.
    * Optimistic: the written rows and their subtrees read `mode` at once, then
    * those plus their ancestors are re-read. Reverts on failure.
    */
-  const write = async (rows: readonly AccessRow[], mode: TeamAccessMode, except?: string): Promise<boolean> => {
-    const vaultWide = rows.length === 0;
+  const write = async (selection: readonly AccessRow[] | null, mode: TeamAccessMode, except?: string): Promise<boolean> => {
+    if (selection?.length === 0) return false;
+    const vaultWide = selection === null;
+    const rows = selection ?? [];
     const resources = vaultWide ? [{ resourceType: "vault" as const, resourceId: orgId }] : rows.map(resourceOf);
     // A row is affected when it, or one of its ancestors, was written: one
     // set lookup per path level instead of scanning every written row.
@@ -458,7 +461,7 @@ export function MemberAccessBoard({
       return;
     }
     guarded(personVaultMode, choice, { kind: "person", name: fullName, self: isSelf }, async () => {
-      await write([], choice);
+      await write(null, choice);
     });
   };
 
@@ -483,7 +486,25 @@ export function MemberAccessBoard({
     }
   };
 
-  const addAll = (mode: TeamAccessMode) => setEverything(mode);
+  const addAll = (mode: TeamAccessMode) => {
+    if (!canSetAccess || busy) return;
+    // Snapshot existing item roots. Folder writes include their descendants,
+    // just like moving those rows individually; the vault default is untouched.
+    const roots = topLevelRows(allRows.map((row) => ({ row, grey: false, indent: 0 })));
+    if (roots.length === 0) return;
+    const apply = async () => {
+      if (await write(roots, mode)) toast("Updated access to existing items.");
+    };
+    if (mode === "private") {
+      setConfirm({
+        title: "Move all existing items to No access?",
+        button: "Remove access",
+        outcome: `${isSelf ? "You" : who} will lose access to these items. The vault-wide access setting will stay the same.`,
+        danger: true,
+        apply,
+      });
+    } else void apply();
+  };
 
   const removeAll = (column: readonly BoardRow[]) => {
     if (!canSetAccess || busy) return;
@@ -743,7 +764,7 @@ export function MemberAccessBoard({
             const actions: Array<{ value: ColumnAction; label: string; hint: string }> = [
               { value: "expand", label: "Expand all", hint: "Show what's inside every folder" },
               { value: "collapse", label: "Collapse all", hint: "Show only the top level" },
-              { value: "add", label: "Add all", hint: "Move every folder and note here" },
+              { value: "add", label: "Add all", hint: "Move existing items here; keep the vault default" },
             ];
             if (col.mode !== "private") {
               actions.push({ value: "remove", label: "Remove all", hint: "Move everything here to No access" });

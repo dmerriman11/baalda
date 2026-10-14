@@ -765,6 +765,9 @@ export class SyncManager implements InboundHost {
   private folderCandidates = new Map<string, number>();
   /** {@link drainFolderMoves} is deciding: `goneFolders` was already taken. */
   private pairingFolders = false;
+  /** {@link drainDiskDeletes} is running: it took `goneFolders` and the pending
+   *  deletes at its start, so they no longer show that a pull must wait. */
+  private diskDeleteDrainsInFlight = 0;
   /**
    * The vault root folder is gone while the app is open (#221): renamed, moved
    * or unmounted. Latched until the vault is reopened (teardown clears it);
@@ -1655,7 +1658,12 @@ export class SyncManager implements InboundHost {
       // and an agent that edits one note and renames another in the same
       // second sends both — so this hold is what keeps a live rename paired.
       // The drain runs this pull when done.
-      if (this.goneFolders.size > 0 || this.pendingDiskDeletes.size > 0) {
+      // The same holds while a drain is running: it already took both maps.
+      if (
+        this.goneFolders.size > 0 ||
+        this.pendingDiskDeletes.size > 0 ||
+        this.diskDeleteDrainsInFlight > 0
+      ) {
         this.pullAfterDiskDeletes = true;
         return;
       }
@@ -2461,6 +2469,7 @@ export class SyncManager implements InboundHost {
     /** sha256 of files this drain already read itself (folder candidates that
      *  the index has not seen yet), for the per-note pairing below. */
     let knownShas = new Map<string, string>();
+    this.diskDeleteDrainsInFlight++;
     try {
       // 0. The vault root is still a folder (#221). A root that vanished makes
       //    every path below read as deleted; nothing here may act on that.
@@ -2603,6 +2612,7 @@ export class SyncManager implements InboundHost {
       //    choice without manufacturing another retained copy.
       await this.propagateAndForget(deletes, scope);
     } finally {
+      this.diskDeleteDrainsInFlight = Math.max(0, this.diskDeleteDrainsInFlight - 1);
       // Whatever happened above, a batch that asked for a pull gets one now —
       // unless the vault root is gone, when no pull may run at all.
       if (this.pullAfterDiskDeletes && scope.isCurrent() && !this.rootMissing) {
@@ -6312,6 +6322,7 @@ export class SyncManager implements InboundHost {
     this.pendingDeleteByPath.clear();
     this.renameCandidates.clear();
     this.pullAfterDiskDeletes = false;
+    this.diskDeleteDrainsInFlight = 0;
     // #221 state belongs to the folder we are leaving. Reopening a vault from
     // its new location is a new open: the root is re-checked, an unanswered
     // bulk delete falls back to the old (restoring) behaviour, and the

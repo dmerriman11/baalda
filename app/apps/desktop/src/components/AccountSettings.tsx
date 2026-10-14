@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { DEFAULT_SERVER_URL } from "../lib/api";
 import type { AccountSettingsTab } from "../lib/settingsTabs";
 import { authManager } from "../lib/auth/authManager";
-import { readRecentServers, rememberServer, switchServer } from "../lib/auth/recentServers";
+import { readRecentServers, switchServer } from "../lib/auth/recentServers";
 import { normalizeServerUrl, serverHost } from "../lib/auth/serverChoice";
 import {
   ACTIVITY_STATUSES,
@@ -612,7 +612,9 @@ function ConnectionTab() {
 
   useEffect(() => {
     setDraft(serverUrl);
-    setRecent(rememberServer(serverUrl));
+    // Read only: opening the tab must not reorder the history. Recents are
+    // recorded by a switch that actually landed (`switchServer`).
+    setRecent(readRecentServers());
   }, [serverUrl]);
 
   /**
@@ -621,6 +623,10 @@ function ConnectionTab() {
    * typo used to swap a working session for a signed-out app and no message at
    * all — `save` had a `finally` and no `catch`.
    */
+  // Compare the normalized address, so "https://x.example/" still selects
+  // its recent entry instead of the placeholder.
+  const draftUrl = normalizeServerUrl(draft);
+
   const save = async () => {
     const url = normalizeServerUrl(draft);
     if (!url) {
@@ -639,8 +645,10 @@ function ConnectionTab() {
         switchTo: (next) => useStore.getState().setServerUrl(next),
         writeChoice: writeServerChoice,
         defaultUrl: DEFAULT_SERVER_URL,
+        previousUrl: serverUrl,
       });
       if (!switched) return;
+      setRecent(readRecentServers());
       setSaved(true);
       window.setTimeout(() => setSaved(false), 2500);
     } catch (e) {
@@ -660,7 +668,7 @@ function ConnectionTab() {
         <label className="field">
           <span className="field-label">Recent connections</span>
           <select
-            value={recent.includes(draft) ? draft : ""}
+            value={draftUrl && recent.includes(draftUrl) ? draftUrl : ""}
             disabled={busy}
             onChange={(e) => { setDraft(e.target.value); setSaved(false); setError(null); }}
           >

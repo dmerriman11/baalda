@@ -38,16 +38,21 @@ export interface SwitchServerDeps {
   /** Persist the managed/custom choice. */
   writeChoice: (choice: ServerChoice) => void;
   defaultUrl: string;
+  /** The server being left, recorded alongside the new one. */
+  previousUrl?: string;
 }
 
 /**
  * The Connection tab's Save: switch, and only once the switch actually landed
  * record the managed/custom choice. A cancelled switch resolves `false` and a
- * failed one throws — neither touches the choice.
+ * failed one throws — neither touches the choice nor the recent list. Recents
+ * are recorded here and only here, not when the tab merely opens.
  */
 export async function switchServer(url: string, deps: SwitchServerDeps): Promise<boolean> {
   const switched = await deps.switchTo(url);
   if (!switched) return false;
   deps.writeChoice(url === deps.defaultUrl ? "managed" : "custom");
+  if (deps.previousUrl) rememberServer(deps.previousUrl);
+  rememberServer(url);
   return true;
 }

@@ -46,3 +46,16 @@ it("writes the managed/custom choice only after the switch landed", async () => 
   await switchServer("https://api.example", deps(async () => true));
   expect(writeChoice).toHaveBeenLastCalledWith("managed");
 });
+
+it("records recents only for a switch that landed, newest first", async () => {
+  const deps = (ok: boolean) => ({
+    switchTo: async () => ok,
+    writeChoice: vi.fn(),
+    defaultUrl: "https://api.example",
+    previousUrl: "https://one.example",
+  });
+  await switchServer("https://two.example/", deps(false));
+  expect(readRecentServers()).toEqual([]);
+  await switchServer("https://two.example/", deps(true));
+  expect(readRecentServers()).toEqual(["https://two.example", "https://one.example"]);
+});

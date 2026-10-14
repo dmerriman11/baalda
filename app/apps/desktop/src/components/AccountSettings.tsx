@@ -603,6 +603,7 @@ function NotificationsTab() {
 
 function ConnectionTab() {
   const serverUrl = useStore((s) => s.serverUrl);
+  const addressInput = useRef<HTMLInputElement>(null);
   const [draft, setDraft] = useState(serverUrl);
   const [recent, setRecent] = useState(readRecentServers);
   const [busy, setBusy] = useState(false);
@@ -648,7 +649,7 @@ function ConnectionTab() {
         One server is active at a time. Switching pauses sync with the previous
         server. Choose a vault on the new server to resume syncing.
       </p>
-      {recent.length > 1 && (
+      {recent.length > 0 && (
         <label className="field">
           <span className="field-label">Recent connections</span>
           <select
@@ -665,9 +666,24 @@ function ConnectionTab() {
           </select>
         </label>
       )}
+      <div className="update-actions">
+        <button
+          className="secondary sm"
+          disabled={busy}
+          onClick={() => {
+            setDraft("");
+            setSaved(false);
+            setError(null);
+            addressInput.current?.focus();
+          }}
+        >
+          Add server
+        </button>
+      </div>
       <label className="field">
         <span className="field-label">Server URL</span>
         <input
+          ref={addressInput}
           value={draft}
           disabled={busy}
           onChange={(e) => setDraft(e.target.value)}
@@ -685,7 +701,7 @@ function ConnectionTab() {
       <div className="update-actions">
         <button
           className="primary sm"
-          disabled={busy || draft.trim() === serverUrl}
+          disabled={busy || !draft.trim() || normalizeServerUrl(draft) === serverUrl}
           onClick={() => void save()}
         >
           {busy && <span className="btn-spinner" aria-hidden="true" />}

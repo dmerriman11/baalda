@@ -1,0 +1,30 @@
+# Optional MinIO service. Include explicitly alongside the base Compose file:
+#   docker compose -f docker-compose.yml -f docker-compose.minio.yml up -d minio
+# Set MINIO_ROOT_USER and MINIO_ROOT_PASSWORD in .env first.
+# See README.md for bucket creation and server attachment-storage configuration.
+# Merely starting MinIO does not switch the server away from PostgreSQL storage.
+services:
+  minio:
+    image: quay.io/minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
+    volumes:
+      # Named volume, like the database's: this is where the attachments live
+      # once BLOB_STORAGE=s3. `docker compose down -v` deletes it. Back it up.
+      - baalda_minio:/data
+    # Not published by default — the server reaches it on the internal network.
+    # Uncomment to expose the API (9000) and the web console (9001) on the host.
+    # ports:
+    #   - "127.0.0.1:9000:9000"
+    #   - "127.0.0.1:9001:9001"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  baalda_minio:

@@ -11,6 +11,8 @@ cp .env.example .env          # fill in POSTGRES_PASSWORD, JWT_SECRET, BETTER_AU
 docker compose up -d
 ```
 
+Attachments use PostgreSQL by default. No MinIO credentials are required.
+
 Then in the desktop app: **account menu → Server settings →** your
 `BETTER_AUTH_URL` → **Save**. Create an account and you're synced.
 
@@ -87,3 +89,68 @@ docker compose exec -T postgres pg_dump -U baalda baalda | gzip > baalda-$(date 
   Redis.
 
 Full env var reference: [`docs/DEPLOY.md`](../../docs/DEPLOY.md).
+
+## Optional MinIO storage
+
+MinIO is defined in `docker-compose.minio.yml`, which Compose does not load
+by default. Unlike a disabled profile in the base file, this keeps MinIO's
+required-variable checks out of the PostgreSQL-only startup path.
+
+1. Set `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD` in `.env`. Use a strong,
+   unique password (for example, generate one with `openssl rand -hex 24`).
+2. Start MinIO and create the bucket:
+
+   ```bash
+   docker compose -f docker-compose.yml -f docker-compose.minio.yml up -d minio
+   docker compose -f docker-compose.yml -f docker-compose.minio.yml exec minio sh -c 'mc alias set local http://localhost:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" && mc mb --ignore-existing local/baalda'
+   ```
+
+   Credentials are expanded inside the container; `.env` does not need to be
+   sourced into your shell. Missing or empty credentials fail configuration
+   validation when this additional file is included.
+
+3. To store new attachments in MinIO, add the following to `x-server-env` in
+   `docker-compose.yml`:
+
+   ```yaml
+   BLOB_STORAGE: s3
+   S3_ENDPOINT: ${S3_ENDPOINT:?set a client-reachable MinIO endpoint in .env}
+   S3_BUCKET: baalda
+   S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env}
+   S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
+   S3_FORCE_PATH_STYLE: "true"
+   ```
+
+   Publish the MinIO API port using the commented `ports` example in
+   `docker-compose.minio.yml`, and set `S3_ENDPOINT` in `.env` to an address
+   both the server container and clients can reach. For a team deployment,
+   use an HTTPS hostname with TLS terminated in front of MinIO.
+
+   `http://minio:9000` only resolves inside the Compose network. Setting
+   `S3_PROXY_DOWNLOADS: "1"` can proxy downloads through the server, but uploads
+   still use presigned URLs and require a client-reachable endpoint. See the
+   [S3 deployment guide](../../docs/DEPLOY.md#bucket-cors) for browser CORS.
+
+4. Apply the server configuration:
+
+   ```bash
+   docker compose -f docker-compose.yml -f docker-compose.minio.yml up -d
+   ```
+
+Include both `-f` arguments for subsequent MinIO-enabled operations, including
+`ps`, `logs`, upgrades and `down`. The old `--profile minio` command is replaced
+by explicit file inclusion. Starting MinIO alone does not change the server's
+storage backend or migrate existing attachments. Back up both PostgreSQL and
+the `baalda_minio` volume when using MinIO; `down -v` deletes those volumes.
+
+## Compose configuration regression check
+
+From the repository root, run:
+
+```bash
+python3 scripts/test-compose-config.py
+```
+
+This checks the default stack without MinIO credentials, and the optional
+configuration with missing, empty, and valid credentials. It uses an isolated
+environment and does not start containers or read your `.env`.

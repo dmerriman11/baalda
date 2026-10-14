@@ -16,6 +16,13 @@ on:
   workflow_dispatch:
 
 jobs:
+  compose-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check default and optional MinIO Compose configurations
+        run: python3 scripts/test-compose-config.py
+
   test:
     runs-on: ubuntu-latest
     defaults:

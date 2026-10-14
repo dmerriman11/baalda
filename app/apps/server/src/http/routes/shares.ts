@@ -1,3 +1,4 @@
+import { setAuditActor, withAuditActor } from "../../audit/access.js";
 import { randomUUID } from "node:crypto";
 import { isAccountReadOnly } from "../../billing/lapse.js";
 import { Hono } from "hono";
@@ -570,39 +571,43 @@ export function createShareRoutes(deps: ShareDeps): Hono {
       }
     }
 
-    const id = randomUUID();
-    const accessRevision = await nextAccessRevision(pool, gate.organizationId!);
-    const { rows } = await pool.query<{ id: string }>(
-      `INSERT INTO shares
-         (id, org_id, resource_type, resource_id, principal_type, principal_id, permission, created_by, access_revision)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-       ON CONFLICT (resource_type, resource_id, principal_type, principal_id)
-       DO UPDATE SET permission = EXCLUDED.permission, access_revision = EXCLUDED.access_revision
-       RETURNING id`,
-      [
-        id,
-        gate.organizationId,
-        resourceType,
-        resourceId,
-        principalType,
-        principalId,
-        permission,
-        session.userId,
-        accessRevision,
-      ],
-    );
-
-    // An Everyone/org lock subsumes any per-user locks on the same resource —
-    // drop them so a single Unlock actually unlocks. (Those users stay locked by
-    // the org lock, so no access change and no socket kick is needed.)
-    if (permission === "locked" && principalType === "org") {
-      await pool.query(
-        `DELETE FROM shares
-          WHERE resource_type = $1 AND resource_id = $2
-            AND principal_type = 'user' AND permission = 'locked'`,
-        [resourceType, resourceId],
+    const { rows } = await withAuditActor(session.userId, async (client) => {
+      const id = randomUUID();
+      const accessRevision = await nextAccessRevision(client, gate.organizationId!);
+      const { rows } = await client.query<{ id: string }>(
+        `INSERT INTO shares
+           (id, org_id, resource_type, resource_id, principal_type, principal_id, permission, created_by, access_revision)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         ON CONFLICT (resource_type, resource_id, principal_type, principal_id)
+         DO UPDATE SET permission = EXCLUDED.permission, access_revision = EXCLUDED.access_revision
+         RETURNING id`,
+        [
+          id,
+          gate.organizationId,
+          resourceType,
+          resourceId,
+          principalType,
+          principalId,
+          permission,
+          session.userId,
+          accessRevision,
+        ],
       );
-    }
+
+      // An Everyone/org lock subsumes any per-user locks on the same resource —
+      // drop them so a single Unlock actually unlocks. (Those users stay locked by
+      // the org lock, so no access change and no socket kick is needed.)
+      if (permission === "locked" && principalType === "org") {
+        await client.query(
+          `DELETE FROM shares
+            WHERE resource_type = $1 AND resource_id = $2
+              AND principal_type = 'user' AND permission = 'locked'`,
+          [resourceType, resourceId],
+        );
+      }
+
+      return { rows };
+    });
 
     // Any downgrade to read-only must reach live editors immediately — force
     // reconnect so open sessions come back with fresh (now read-only) sync
@@ -858,6 +863,7 @@ export function createShareRoutes(deps: ShareDeps): Hono {
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
+      await setAuditActor(client, session.userId);
       const accessRevision = await nextAccessRevision(client, orgId);
 
       const overrides = await teamOverrides(client, orgId, vaultIds);
@@ -1024,7 +1030,7 @@ export function createShareRoutes(deps: ShareDeps): Hono {
 
     // Compute affected docs BEFORE deleting (folder subtree join needs the rows).
     const docs = await docsForResource(share.resource_type, share.resource_id);
-    await pool.query("DELETE FROM shares WHERE id = $1", [shareId]);
+    await withAuditActor(session.userId, client => client.query("DELETE FROM shares WHERE id = $1", [shareId]));
 
     for (const d of docs) {
       deps.disconnectDoc(d.vaultId, d.docId);

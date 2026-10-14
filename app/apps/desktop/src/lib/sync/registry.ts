@@ -199,8 +199,8 @@ interface VaultSyncConfig {
    */
   fileBases?: Record<string, string>;
   /**
-   * Folders that left this user's visible set while still on disk, path → their
-   * last server id (`VaultRegistry.revokedFolders`): kept so the empty-only
+   * Folders awaiting removal (revoked, or a deleted folder whose disk removal
+   * failed), path → last server id (`VaultRegistry.revokedFolders`). The empty-only
    * removal is retried after a relaunch. Absent means none pending.
    */
   revokedFolders?: Record<string, string>;
@@ -807,15 +807,15 @@ export class VaultRegistry {
   private byPathCi: Map<string, string> | null = null;
   private folderByPath = new Map<string, string>();
   /**
-   * Folders that LEFT this user's visible set (access revoked: not listed, not
-   * tombstoned, not moved) while still on disk, path → their last server id.
+   * Folders awaiting removal, path → last server id. Includes revocations and
+   * deleted folders whose removal failed on disk.
    * `folderByPath` is re-derived from the listing every pass, so without this a
    * folder whose notes were still on disk when its removal was first tried (the
    * note revocation held for its ACL signal or access check, or refused by the
    * cap) lost its id for good and stayed as an empty shell once the notes went
    * on a later pass. Fed back into `planInbound` as a recorded id so the same
-   * gated, empty-only removal is retried; dropped once the folder is gone, is
-   * listed again, or is tombstoned. Session memory only.
+   * gated, empty-only removal is retried; dropped once the folder is gone or
+   * listed again. Persisted so a failed removal retries after restart.
    */
   private revokedFolders = new Map<string, string>();
   /** Folder paths (pathKey) the server refused to register with
@@ -2898,7 +2898,9 @@ export class VaultRegistry {
     const tombstonedFolders = new Set<string>();
     if (args.folderTombstones) {
       const dead = new Set(args.folderTombstones);
-      for (const [rp, id] of this.folderByPath) if (dead.has(id)) tombstonedFolders.add(rp);
+      for (const [rp, id] of new Map([...this.revokedFolders, ...this.folderByPath])) {
+        if (dead.has(id)) tombstonedFolders.add(rp);
+      }
     }
     const listedFolderIds = new Set(args.serverFolders.map((f) => f.id));
     const deadFolderIds = new Set(args.folderTombstones ?? []);
@@ -2914,14 +2916,14 @@ export class VaultRegistry {
           await ipc.deletePath(path, this.epoch());
           removed = true;
         }
-        // A folder that left the visible set and is still on disk (its notes
-        // not removed yet) keeps its id so a later pass can retry the removal.
-        if (
-          !removed &&
-          folderId !== undefined &&
-          !listedFolderIds.has(folderId) &&
-          !deadFolderIds.has(folderId)
-        ) {
+        // A failed child removal also keeps its parents pending. Their being
+        // non-empty is not evidence of NEW local work and must not resurrect
+        // an otherwise deleted subtree.
+        const pendingChild = [...this.revokedFolders].some(([child, id]) =>
+          deadFolderIds.has(id) && pathKey(child).startsWith(pathKey(path) + "/"));
+        const pending = !removed && folderId !== undefined &&
+          !listedFolderIds.has(folderId) && (!deadFolderIds.has(folderId) || pendingChild);
+        if (pending) {
           if (this.revokedFolders.get(path) !== folderId) {
             this.revokedFolders.set(path, folderId);
             this.persist();
@@ -2933,7 +2935,7 @@ export class VaultRegistry {
         if (removed) {
           changedDisk = true;
           this.markMaterialized(path); // our removal; one watcher echo to swallow
-        } else if (tombstonedFolders.has(path) && !own) {
+        } else if (tombstonedFolders.has(path) && !own && !pending) {
           reconcileReport.record({
             kind: "folderKept",
             path,
@@ -2942,6 +2944,13 @@ export class VaultRegistry {
         }
       } catch (e) {
         if (ipc.isVaultMismatch(e)) return { changedDisk, suppress: plan.suppress };
+        // A failed removal is not evidence of new local work. Retain the
+        // deleted identity across retries/restarts rather than registering the
+        // same directory as a brand-new folder in the outbound half below.
+        if (folderId !== undefined) {
+          this.revokedFolders.set(path, folderId);
+          this.persist();
+        }
         this.sink.item("failed");
         this.recordFailure({
           kind: "inbound",
@@ -4048,10 +4057,10 @@ export class VaultRegistry {
         }
       }
     }
-    // A revoked folder that is listed again, was deleted, or left the disk is
-    // no longer pending removal.
+    // A pending folder that is listed again or left the disk no longer needs
+    // removal. A tombstoned identity stays pending when disk removal failed.
     for (const [rp, id] of [...this.revokedFolders]) {
-      if (listedFolderIds.has(id) || deadFolderIds.has(id) || !onDiskFoldersCi.has(pathKey(rp))) {
+      if (listedFolderIds.has(id) || !onDiskFoldersCi.has(pathKey(rp))) {
         this.revokedFolders.delete(rp);
         this.persist();
       }
@@ -4089,6 +4098,7 @@ export class VaultRegistry {
     const missingFolders = folders.filter(
       (f) =>
         !this.folderByPath.has(f.path) &&
+        !deadFolderIds.has(this.revokedFolders.get(f.path) ?? "") &&
         !this.hiddenPaths.has(pathKey(f.path)) &&
         !this.isOwnDelete(f.path) &&
         !this.isHeldRefusal(f.path),

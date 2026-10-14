@@ -577,6 +577,14 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   `public-links` (`/api/notes/:docId/public-link` mint/inspect/revoke + public `GET /p/:token`
   read-only page — token is the capability; renders via the escape-first `render/note-html.ts`,
   no renderer deps).
+- `audit/access.ts` + migration 056 record share, membership and join-default changes in
+  `access_audit`, including actor, time and before/after values. Database triggers retain deletes
+  and roll back with the mutation; explicit transaction-local actor context covers HTTP/MCP writes.
+  Better Auth membership hooks enrich the recorded event with request identity (never confuse
+  the hook's target user with its actor). Unknown/system actors remain null; history begins at
+  migration, without fabricated backfill. Owners/admins read paginated history via
+  `GET /api/orgs/:orgId/access-audit?limit=100&before=<cursor>` or MCP `list_access_audit`.
+  No note content or credentials are recorded. There is no desktop history panel yet.
 - `billing/` — Polar behind `provider.ts`; `store.ts` is the ONLY writer of a `subscriptions` row and
   always persists the provider's returned state. One vault = one subscription (409 `already_subscribed`).
   `BILLING_MODEL=vault|team` (default `vault` until the production flip) picks the model. **`team`
@@ -989,3 +997,11 @@ HTML previews compare file content on watcher notifications, including indexed
 `unchanged` echoes: the preview may still contain the empty pre-sync document even
 when the disk index already has the newly received content. Bridge echo guards
 remain unchanged, and identical HTML does not reload interactive frames.
+
+Restricted folder listings preserve per-user grants through an Everyone deny, including empty
+folders. Ancestors of a readable item remain visible as navigation paths without granting content
+access. MCP `list_folders` uses the same filtered listing. Deleted-note permission queries expand
+paths into ancestor prefixes and equijoin them; avoid restoring correlated prefix cross products.
+Read-only recovery refuses an empty server state over populated local bytes or CRDT content,
+matching the bridge's empty-write guard. Failed folder removals retain their server identities,
+including parent folders and across restart; filesystem failures are distinct from non-empty folders.

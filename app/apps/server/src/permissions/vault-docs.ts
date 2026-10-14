@@ -184,7 +184,7 @@ async function deniedDocsInVault(
      ),
      denied_subtree AS (
         SELECT id, parent_id FROM folders WHERE id IN (SELECT id FROM denied_seed)
-        UNION ALL
+        UNION
         SELECT f.id, f.parent_id FROM folders f JOIN denied_subtree d ON f.parent_id = d.id
      ),
      denied_files AS (
@@ -243,7 +243,7 @@ async function deniedFolderIds(
      ),
      denied_subtree AS (
         SELECT id, parent_id FROM folders WHERE id IN (SELECT id FROM denied_seed)
-        UNION ALL
+        UNION
         SELECT f.id, f.parent_id FROM folders f JOIN denied_subtree d ON f.parent_id = d.id
      )
      SELECT DISTINCT id FROM denied_subtree`,
@@ -320,46 +320,45 @@ async function listDocsInVault(
   // the tombstone question asks for this: a LIVE note's `folder_id` is
   // authoritative and must stay the only thing that decides it.
   //
-  // MATERIALIZED (#263): referenced once, Postgres inlines the CTE, and the
-  // planner then re-ran the whole tombstone scan inside the per-note EXISTS —
-  // once per deleted note per call. Same rows, same answer; it is now computed
-  // once per statement.
+  // Expand each path into its bounded list of ancestor paths, then equijoin.
+  // Prefix EXISTS joins compared every tombstone to every shared folder and
+  // every deleted note to every tombstone (#317). Materializing that scan only
+  // prevented repeated planning; it still grew as the product of both sets.
   const deadFolderCte = opts.deleted
     ? `,
-       dead_folder_paths AS MATERIALIZED (
-          SELECT ft.path, ft.deleted_at FROM folder_tombstones ft
+       dead_ancestors AS MATERIALIZED (
+          SELECT ft.id, array_to_string(p.parts[1:depth.n], '/') AS path
+            FROM folder_tombstones ft
+            CROSS JOIN LATERAL (SELECT string_to_array(lower(ft.path), '/') AS parts) p
+            CROSS JOIN LATERAL generate_series(1, cardinality(p.parts) - 1) depth(n)
            WHERE ft.vault_id = $2
-             AND (
-               -- the shared folder itself was deleted …
-               ft.id IN (SELECT id FROM shared_folders)
-               -- … or it sits under a shared folder that is still alive.
-               OR EXISTS (
-                 SELECT 1 FROM folders f2
-                  WHERE f2.id IN (SELECT id FROM subtree)
-                    AND starts_with(lower(ft.path), lower(f2.path) || '/')
-               )
-             )
+       ),
+       dead_folder_paths AS MATERIALIZED (
+          SELECT lower(ft.path) AS path, ft.deleted_at FROM folder_tombstones ft
+           WHERE ft.vault_id = $2
+             AND (ft.id IN (SELECT id FROM shared_folders)
+               OR ft.id IN (
+                 SELECT a.id FROM dead_ancestors a
+                 JOIN folders f ON lower(f.path) = a.path AND f.vault_id = $2
+                 JOIN subtree s ON s.id = f.id
+               ))
+       ),
+       deleted_ancestors AS MATERIALIZED (
+          SELECT n.id, n.created_at, array_to_string(p.parts[1:depth.n], '/') AS path
+            FROM notes n
+            CROSS JOIN LATERAL (SELECT string_to_array(lower(n.rel_path), '/') AS parts) p
+            CROSS JOIN LATERAL generate_series(1, cardinality(p.parts) - 1) depth(n)
+           WHERE n.vault_id = $2 AND n.deleted_at IS NOT NULL
+       ),
+       dead_docs AS (
+          SELECT a.id FROM deleted_ancestors a
+          JOIN dead_folder_paths d ON d.path = a.path
+           -- A historical folder share cannot claim a later same-path note.
+           AND d.deleted_at >= a.created_at
        )`
     : "";
   const deadFolderPredicate = opts.deleted
-    ? `OR EXISTS (
-                 SELECT 1 FROM dead_folder_paths d
-                  WHERE starts_with(lower(n.rel_path), lower(d.path) || '/')
-                    -- A tombstone may only claim notes that already EXISTED
-                    -- when it was written. Without this it matches purely by
-                    -- path: create a new, unshared folder at the same path
-                    -- later, and its deleted notes resolve through the old
-                    -- folder's long-dead share. Bounded harm — tombstones carry
-                    -- ids only, and the client holds no file for a note it never
-                    -- had — but it is an id disclosure, and it contradicts the
-                    -- doc-id-not-path invariant this system is built on.
-                    --
-                    -- Compared against created_at, not deleted_at:
-                    -- deleteFolderCascade soft-deletes the notes BEFORE it
-                    -- writes the folder tombstone, so the tombstone is always
-                    -- marginally the later of the two even in the ordinary case.
-                    AND d.deleted_at >= n.created_at
-               )`
+    ? "OR n.id IN (SELECT id FROM dead_docs)"
     : "";
   // `creatorCounts` exists for the rescue call below: under item-Private,
   // authorship no longer keeps a doc, so the "reaches it personally" set is
@@ -377,7 +376,7 @@ async function listDocsInVault(
        ),
        subtree AS (
           SELECT id FROM folders WHERE id IN (SELECT id FROM shared_folders)
-          UNION ALL
+          UNION
           SELECT f.id FROM folders f JOIN subtree s ON f.parent_id = s.id
        ),
        shared_files AS (
@@ -624,6 +623,27 @@ export async function listVisibleFolders(
   // user created themselves stays visible either way (that's "only you").
   const userDenied = await deniedFolderIds(db, "user", userId, vaultId);
   const orgDenied = await deniedFolderIds(db, "org", access.organizationId, vaultId);
+  // Item Private withdraws the team grant, but explicit per-user grants still
+  // reach their subtree, exactly as they do for notes. Empty folders have no
+  // readable note to bring them into the tree, so this must be folder-based.
+  if (orgDenied.size > 0) {
+    if (access.personal === "edit" || access.personal === "view") {
+      orgDenied.clear();
+    } else {
+      const { rows: personalFolders } = await db.query<{ id: string }>(
+        `WITH RECURSIVE granted AS (
+           SELECT f.id FROM folders f JOIN shares s ON s.resource_id = f.id
+            WHERE f.vault_id = $2 AND s.resource_type = 'folder'
+              AND s.principal_type = 'user' AND s.principal_id = $1
+              AND s.permission IN ('view', 'edit', 'readonly')
+           UNION
+           SELECT f.id FROM folders f JOIN granted g ON f.parent_id = g.id
+         ) SELECT id FROM granted`,
+        [userId, vaultId],
+      );
+      for (const row of personalFolders) orgDenied.delete(row.id);
+    }
+  }
   // Neither deny is undone by authorship — see `listDocsInVault`.
   const hidden = (id: string) => userDenied.has(id) || orgDenied.has(id);
   // A per-user grant deeper than a per-user deny lifts that subfolder, so its
@@ -632,7 +652,7 @@ export async function listVisibleFolders(
   // Folders a per-user deny hides but that hold a note a deeper per-user row
   // lifted — the path to that note. Only read when such a deny exists.
   const liftedHomes = new Set<string>();
-  if (userDenied.size > 0) {
+  if (userDenied.size > 0 || orgDenied.size > 0) {
     const readableHere = await listReadableDocsInVault(userId, vaultId, db);
     const { rows: homes } = await db.query<{ folder_id: string }>(
       `SELECT DISTINCT folder_id FROM notes
@@ -640,9 +660,9 @@ export async function listVisibleFolders(
        UNION
        SELECT DISTINCT folder_id FROM files
         WHERE vault_id = $1 AND folder_id = ANY($2::text[]) AND id = ANY($3::text[])`,
-      [vaultId, [...userDenied], [...readableHere]],
+      [vaultId, [...new Set([...userDenied, ...orgDenied])], [...readableHere]],
     );
-    for (const h of homes) if (!orgDenied.has(h.folder_id)) liftedHomes.add(h.folder_id);
+    for (const h of homes) liftedHomes.add(h.folder_id);
   }
   const finish = (shown: VaultFolderRow[]): VaultFolderRow[] => {
     const byId = new Map(all.rows.map((f) => [f.id, f]));
@@ -657,7 +677,7 @@ export async function listVisibleFolders(
     }
     for (const f of starts) {
       let parent = f.parent_id;
-      while (parent && !ids.has(parent) && userDenied.has(parent) && !orgDenied.has(parent)) {
+      while (parent && !ids.has(parent)) {
         ids.add(parent);
         parent = byId.get(parent)?.parent_id ?? null;
       }
@@ -692,7 +712,7 @@ export async function listVisibleFolders(
      ),
      down AS (
         SELECT id, parent_id FROM folders WHERE vault_id = $2 AND id IN (SELECT id FROM seed)
-        UNION ALL
+        UNION
         SELECT f.id, f.parent_id FROM folders f JOIN down d ON f.parent_id = d.id
      ),
      note_folders AS (
@@ -704,7 +724,7 @@ export async function listVisibleFolders(
         SELECT id, parent_id FROM folders
          WHERE vault_id = $2
            AND id IN (SELECT id FROM down UNION SELECT id FROM note_folders)
-        UNION ALL
+        UNION
         SELECT f.id, f.parent_id FROM folders f JOIN up u ON f.id = u.parent_id
      )
      SELECT DISTINCT id FROM up`,

@@ -21,6 +21,12 @@
     (every app still installs it). Ask before each release: silent, or notes?
 -->
 
+## 0.1.84
+
+- Sync: protect populated notes during read-only recovery and retry failed folder deletions without recreating them for the team.
+- Access: named members can see empty restricted folders. Owners and admins can inspect future permission and membership changes through MCP or the server API.
+- Large vaults: reduce database work when resolving access to deleted notes and folders.
+
 ## 0.1.83
 
 - Introducing dashboards: a visual layer for your second brain. Turn your notes into a home for projects, plans, and the things you want to keep in view.

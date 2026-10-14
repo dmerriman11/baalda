@@ -39,7 +39,7 @@ function wouldSend(local: Y.Doc, server: Y.Doc): boolean {
 }
 
 /** A device: local CRDT (server state + one stray op) and a file. */
-function world(opts: { file?: string; stray?: string; edited?: boolean; open?: () => boolean } = {}) {
+function world(opts: { file?: string; stray?: string; edited?: boolean; open?: () => boolean; now?: () => number } = {}) {
   const server = new Y.Doc();
   server.getText("content").insert(0, "server text\n");
   let local = new Y.Doc();
@@ -70,6 +70,7 @@ function world(opts: { file?: string; stray?: string; edited?: boolean; open?: (
     serverState,
     replaceLocal,
     isOpen: opts.open,
+    now: opts.now,
   });
   return {
     h,
@@ -112,6 +113,24 @@ describe("read-only rebase onto the server", () => {
     expect(w.replaceLocal).toHaveBeenCalledTimes(1);
     expect(w.serverState).toHaveBeenCalledTimes(1);
     expect(w.copies).toHaveLength(1);
+  });
+
+  it("does not replace populated local content with an empty server state after an access change", async () => {
+    let now = 0;
+    const w = world({ file: "Finance records", stray: "local ", now: () => now });
+    w.server.getText("content").delete(0, w.server.getText("content").length);
+    await w.h.handle(DOC);
+    expect(w.file()).toBe("Finance records");
+    expect(w.replaceLocal).not.toHaveBeenCalled();
+    expect(w.copies).toEqual([]);
+    expect(wasRebased(DOC)).toBe(false);
+    // A later populated answer still converges after the retry window.
+    now = 60_001;
+    w.server.getText("content").insert(0, "Restored finance records");
+    await w.h.handle(DOC);
+    expect(w.file()).toBe("Restored finance records");
+    expect(w.copies).toEqual(["Finance records"]);
+    expect(wasRebased(DOC)).toBe(true);
   });
 
   it("keeps no copy when the file already equals the server text", async () => {

@@ -4,13 +4,14 @@ import { VaultRegistry } from "../registry";
 /** A bare registry whose pass is a stub we resolve by hand: only `pull()`'s
  *  queueing is under test, not a real reconcile. */
 function harness() {
-  const reg = Object.create(VaultRegistry.prototype) as VaultRegistry & Record<string, unknown>;
-  reg.pullChain = Promise.resolve(false);
-  reg.queuedPull = null;
-  reg.registrations = new Set();
+  const reg = Object.create(VaultRegistry.prototype) as VaultRegistry;
+  const raw = reg as unknown as Record<string, unknown>;
+  raw.pullChain = Promise.resolve(false);
+  raw.queuedPull = null;
+  raw.registrations = new Set();
   const releases: Array<() => void> = [];
   let calls = 0;
-  reg.pullOnce = () => {
+  raw.pullOnce = () => {
     calls++;
     return new Promise<boolean>((r) => releases.push(() => r(true)));
   };

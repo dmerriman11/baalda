@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { UnmaterializablePaths, windowsPathProblem, windowsStrip } from "../windowsPaths";
+import { UnmaterializablePaths, applySkippingUnsafe, windowsPathProblem, windowsStrip } from "../windowsPaths";
 
 describe("windowsPathProblem", () => {
   it("flags names Windows cannot hold", () => {
@@ -35,5 +35,38 @@ describe("UnmaterializablePaths", () => {
     const mac = new UnmaterializablePaths(() => false);
     expect(mac.skip("X/Drafts.")).toBe(false);
     warn.mockRestore();
+  });
+});
+
+describe("applySkippingUnsafe", () => {
+  const entries = [
+    { docId: "a", relPath: "Team/ok.md" },
+    { docId: "b", relPath: "Team/X./a.md" },
+  ];
+  const ok = (es: typeof entries) =>
+    Promise.resolve(es.map((e) => ({ docId: e.docId, status: "written", reason: null as string | null })));
+
+  it("on Windows never sends an unsafe entry and answers it rejected by doc id", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const apply = vi.fn(ok);
+    const paths = new UnmaterializablePaths(() => true);
+    const out = await applySkippingUnsafe(entries, apply, paths);
+    expect(apply).toHaveBeenCalledWith([entries[0]]);
+    expect(out.find((o) => o.docId === "a")?.status).toBe("written");
+    expect(out.find((o) => o.docId === "b")?.status).toBe("rejected");
+    // Only unsafe entries: Rust is not called at all.
+    apply.mockClear();
+    const only = await applySkippingUnsafe([entries[1]], apply, paths);
+    expect(apply).not.toHaveBeenCalled();
+    expect(only).toEqual([{ docId: "b", status: "rejected", reason: "Windows cannot hold this name" }]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+  });
+
+  it("elsewhere passes every entry through unchanged", async () => {
+    const apply = vi.fn(ok);
+    const out = await applySkippingUnsafe(entries, apply, new UnmaterializablePaths(() => false));
+    expect(apply).toHaveBeenCalledWith(entries);
+    expect(out.map((o) => o.status)).toEqual(["written", "written"]);
   });
 });

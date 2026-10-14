@@ -35,6 +35,7 @@ import { viewingDocId } from "../presence/viewingDocId";
 import type { ActivityStatus } from "../prefs";
 import { toast } from "../toast";
 import { AttachmentSync, routesToAttachmentSync } from "./attachments";
+import { applySkippingUnsafe } from "./windowsPaths";
 import { EmbedArrivalFetcher } from "./embedArrival";
 import { BinaryDeleteQueue } from "./binaryDeletes";
 import { BootstrapRunner } from "./bootstrap";
@@ -5554,7 +5555,14 @@ export class SyncManager implements InboundHost {
           api.fetchBootstrapPage(vaultId, sessionId, { cursor }),
         // ONE IPC (and one SQLite transaction) per page. Rust decides each doc's
         // fate from the FILE and the local CRDT tables, never from this list.
-        applyBatch: (entries) => ipc.applyBootstrapBatch(entries, scope.vaultEpoch),
+        // Never a path this OS cannot hold (`windowsPaths.ts`): Win32 would
+        // strip it and write the note under a folder the server never had.
+        applyBatch: (entries) =>
+          applySkippingUnsafe(
+            entries,
+            (safe) => ipc.applyBootstrapBatch(safe, scope.vaultEpoch),
+            registry.unmaterializable,
+          ),
         // A doc that already has local CRDT: merge it the normal cold way, which
         // is what makes re-running a page free.
         coldApply: (docId, update) => store.applyUpdate(docId, update),
@@ -6698,7 +6706,12 @@ export class SyncManager implements InboundHost {
     this.onVaultStatus?.("connecting");
     if (!this.current) this.emitStatus();
     const store = new VaultDocStore({
-      resolvePath: (docId) => this.registry.pathForDocId(docId),
+      // A path this OS cannot hold is no path at all: the cold apply parks the
+      // update and drops it after the pull instead of writing a stripped name.
+      resolvePath: (docId) => {
+        const p = this.registry.pathForDocId(docId);
+        return p && this.registry.unmaterializable.skip(p) ? null : p;
+      },
       // The background feed writes .md files for docs nobody has open. Pin its
       // IO to this vault's epoch so a cold apply that lands after a vault switch
       // is refused by Rust instead of overwriting the new vault's file at the
@@ -6748,7 +6761,12 @@ export class SyncManager implements InboundHost {
         const sv = await createDeferredWithContent(
           {
             deferredPathFor: (id) => this.registry.deferredPathFor?.(id) ?? null,
-            applyBatch: (entries) => ipc.applyBootstrapBatch(entries, scope.vaultEpoch),
+            applyBatch: (entries) =>
+              applySkippingUnsafe(
+                entries,
+                (safe) => ipc.applyBootstrapBatch(safe, scope.vaultEpoch),
+                this.registry.unmaterializable,
+              ),
             markMaterialized: (relPath) => this.registry.markMaterialized(relPath),
             markPushed: (id) => {
               this.registry.markPushed(id);

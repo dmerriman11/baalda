@@ -1005,3 +1005,9 @@ paths into ancestor prefixes and equijoin them; avoid restoring correlated prefi
 Read-only recovery refuses an empty server state over populated local bytes or CRDT content,
 matching the bridge's empty-write guard. Failed folder removals retain their server identities,
 including parent folders and across restart; filesystem failures are distinct from non-empty folders.
+
+Account Settings → Connection remembers up to eight normalized server addresses locally,
+with tokens kept only in the per-server OS keychain. One server is active at a time.
+Switching flushes pending edits and closes the previous vault before changing the shared
+API client; clear the old bearer before exposing the new URL. Choose a destination vault
+explicitly after switching, rather than reconciling the previous server's local folder.

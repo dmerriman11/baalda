@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { DEFAULT_SERVER_URL } from "../lib/api";
 import type { AccountSettingsTab } from "../lib/settingsTabs";
 import { authManager } from "../lib/auth/authManager";
+import { readRecentServers, rememberServer } from "../lib/auth/recentServers";
 import { normalizeServerUrl, serverHost } from "../lib/auth/serverChoice";
 import {
   ACTIVITY_STATUSES,
@@ -603,11 +604,15 @@ function NotificationsTab() {
 function ConnectionTab() {
   const serverUrl = useStore((s) => s.serverUrl);
   const [draft, setDraft] = useState(serverUrl);
+  const [recent, setRecent] = useState(readRecentServers);
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => setDraft(serverUrl), [serverUrl]);
+  useEffect(() => {
+    setDraft(serverUrl);
+    setRecent(rememberServer(serverUrl));
+  }, [serverUrl]);
 
   /**
    * Check the address answers BEFORE adopting it. Changing the server is a
@@ -639,10 +644,32 @@ function ConnectionTab() {
 
   return (
     <div className="connection-tab">
+      <p className="field-hint">
+        One server is active at a time. Switching pauses sync with the previous
+        server. Choose a vault on the new server to resume syncing.
+      </p>
+      {recent.length > 1 && (
+        <label className="field">
+          <span className="field-label">Recent connections</span>
+          <select
+            value={recent.includes(draft) ? draft : ""}
+            disabled={busy}
+            onChange={(e) => { setDraft(e.target.value); setSaved(false); setError(null); }}
+          >
+            <option value="" disabled>Choose a recent server</option>
+            {recent.map((url) => (
+              <option key={url} value={url}>
+                {serverHost(url)}{url === serverUrl ? " (active)" : ""}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
       <label className="field">
         <span className="field-label">Server URL</span>
         <input
           value={draft}
+          disabled={busy}
           onChange={(e) => setDraft(e.target.value)}
           placeholder="https://notes.example.com"
           spellCheck={false}

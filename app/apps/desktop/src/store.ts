@@ -3474,8 +3474,24 @@ export const useStore = create<AppStore>((set, get) => ({
     set({ authError: null });
     // This flow owns the session from here: a detached `initAuth` still
     // restoring the previous one must not land its state on top of ours.
-    ++authInitGen;
+    const gen = ++authInitGen;
+    const switching = normalizeServerUrl(url) !== normalizeServerUrl(get().serverUrl);
+    // Persist pending edits before closing the old vault. A failed flush aborts
+    // the switch so the editor still owns the unsaved buffer.
+    await bridgeManager.currentBridge()?.flushEgest();
+    if (authInitGen !== gen) return;
+    if (switching) {
+      get().closeLocalVault();
+      set({
+        organizations: [], members: [], pendingInvitations: [], userInvitations: [],
+        billingConfig: null, orgBilling: null, myBilling: null,
+      });
+    } else {
+      leaveVaultSync();
+      set({ syncEnabled: false });
+    }
     const session = await authManager.setServerUrl(url);
+    if (authInitGen !== gen) return;
     set({
       serverUrl: authManager.getServerUrl(),
       session,
@@ -3485,7 +3501,9 @@ export const useStore = create<AppStore>((set, get) => ({
       await get().refreshVault();
       await get().refreshBillingConfig();
       await get().refreshOrgBilling();
-      await get().enableSyncForVault();
+      // The previous folder belongs to the old server. The vault picker opens
+      // a destination vault explicitly instead of reconciling that folder here.
+      if (!switching) await get().enableSyncForVault();
       // An invitation link that named THIS server parked itself here waiting
       // for the user's Connect click (`openInviteLink` step 2). The click has
       // landed, so pick it back up — otherwise confirming the server silently

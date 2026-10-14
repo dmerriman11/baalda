@@ -23,6 +23,14 @@ Object.defineProperty(navigator, "userAgent", {
 });
 localStorage.setItem("cbk-theme", params.get("theme") || "light");
 localStorage.setItem("context.sidebarWidth", "328");
+if (params.get("connections") === "true") {
+  localStorage.setItem("context.recentServers", JSON.stringify([
+    "http://preview.invalid",
+    "https://notes.example.com/team",
+    "https://research.example.com",
+  ]));
+}
+
 localStorage.setItem(
   "context.sidebarHidden",
   params.get("sidebarHidden") === "true" ? "hidden" : "shown",

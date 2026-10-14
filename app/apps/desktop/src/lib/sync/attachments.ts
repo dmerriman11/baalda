@@ -65,6 +65,7 @@
 // back to the legacy `POST /api/vaults/:id/blobs` and remembers, so exactly one
 // upload pays for the probe.
 
+import { UnmaterializablePaths } from "./windowsPaths";
 import { announceAttachmentArrived } from "../attachmentArrivals";
 import { formatFor, isNoteExt, mimeForPath as mimeForFormat } from "../formats";
 import { isTransientPath, pathKey } from "../pathIdentity";
@@ -1185,6 +1186,8 @@ export class AttachmentSync {
    * presigned and fetched on EVERY pass and never recorded a base.
    */
   private readonly undownloadable = new Map<string, string>();
+  /** Server paths this OS cannot hold as spelled (`windowsPaths.ts`). */
+  unmaterializable = new UnmaterializablePaths();
 
   constructor(
     private readonly deps: AttachmentSyncDeps,
@@ -1566,6 +1569,8 @@ export class AttachmentSync {
     for (const b of toDownload) {
       if (this.attachmentSyncBlocked && b.relPath && !isUnderAttachments(b.relPath)) continue;
       if (this.undownloadable.get(b.id) === b.sha256) continue;
+      // A name this OS cannot hold (Windows): skipped, warned once, never retried.
+      if (b.relPath && this.unmaterializable.skip(b.relPath)) continue;
       if (b.relPath && this.deps.isDeletePending?.(b.relPath)) {
         console.info(`[attachments] ${b.relPath} has a delete pending — not downloading it back`);
         continue;

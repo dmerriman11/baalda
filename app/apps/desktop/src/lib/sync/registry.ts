@@ -2698,6 +2698,8 @@ export class VaultRegistry {
 
     for (const move of plan.renames) {
       if (this.stopRun()) break;
+      // A destination this OS cannot hold (Windows): keep the old local path.
+      if (this.unmaterializable.skip(move.to)) continue;
       // Nothing may still hold the old path when we move it.
       await this.host?.releaseDoc(move.docId);
       if (this.stale()) return { changedDisk, suppress: plan.suppress };

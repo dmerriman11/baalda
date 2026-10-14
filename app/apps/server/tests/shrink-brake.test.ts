@@ -228,6 +228,11 @@ describe("shrink brake on the write paths", () => {
         8000,
         "bodies reached the server",
       );
+      // The reconnect reloads persisted state. Seeing a live Y.Doc is earlier
+      // than its async append completing, especially on a busy CI database.
+      for (const docId of docs.slice(0, 4)) {
+        await expect.poll(() => serverText(docId), { timeout: 8000 }).toBe(BODY);
+      }
 
       for (const doc of ydocs.slice(0, 3)) {
         const t = doc.getText("content");
@@ -237,7 +242,12 @@ describe("shrink brake on the write paths", () => {
 
       // Re-admitted read-only: wait for the fourth provider to reconnect and
       // sync, then its wipe must not reach the server.
-      await waitFor(() => providers[3].isSynced, 8000, "provider re-synced");
+      await waitFor(() => {
+        const live = server.hocuspocus.documents.get(formatDocName(vaultId, docs[3]));
+        return providers[3].isSynced && !!live?.getConnections().some((connection) =>
+          (connection.context as SyncContext | undefined)?.shrinkHeld === true,
+        );
+      }, 8000, "provider re-admitted read-only");
       const t = ydocs[3].getText("content");
       t.delete(0, t.length);
       await new Promise((r) => setTimeout(r, 500));

@@ -13,6 +13,7 @@ import {
   type SessionInfo,
 } from "../api";
 import * as ipc from "../ipc";
+import { rememberServer } from "./recentServers";
 import type { SessionVerdict } from "../sync/sessionGuard";
 
 /**
@@ -72,6 +73,7 @@ export class AuthManager {
       /* config unavailable — fall back to the default URL */
     }
 
+    rememberServer(this.serverUrl);
     let token: string | null = null;
     try {
       token = await ipc.keychainGet(this.keychainKey());
@@ -99,10 +101,12 @@ export class AuthManager {
   /** Change + persist the server URL. Restores that server's token if present. */
   async setServerUrl(url: string): Promise<SessionInfo | null> {
     const clean = stripSlash(url) || DEFAULT_SERVER_URL;
+    // Persist first: a failed config write must leave the current client intact.
+    await ipc.setServerUrl(clean);
+    // Never expose the old server's bearer token under the new base URL.
+    this.api.setToken(null);
     this.serverUrl = clean;
     this.api.setBaseUrl(clean);
-    await ipc.setServerUrl(clean);
-    this.api.setToken(null);
     return this.init();
   }
 

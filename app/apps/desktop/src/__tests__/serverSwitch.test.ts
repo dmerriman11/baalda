@@ -1,0 +1,54 @@
+// SPDX-License-Identifier: Apache-2.0
+import { beforeEach, expect, it, vi } from "vitest";
+const mocks = vi.hoisted(() => ({
+  flush: vi.fn(async () => {}),
+  disable: vi.fn(),
+  setServerUrl: vi.fn(async () => ({ user: { id: "new-user", name: "New", email: "new@example.com" }, activeOrganizationId: "same-org-id" })),
+}));
+vi.mock("../lib/auth/authManager", () => ({
+  authManager: { api: {}, getServerUrl: () => "https://two.example", setServerUrl: mocks.setServerUrl }, api: {},
+}));
+vi.mock("../lib/sync/docSession", () => ({ syncManager: { disable: mocks.disable, setViewing: vi.fn() } }));
+vi.mock("../lib/bridge", () => ({ bridgeManager: { currentBridge: () => ({ flushEgest: mocks.flush }) } }));
+vi.mock("../lib/ipc", () => ({ clearLastVault: vi.fn(async () => {}) }));
+import { useStore } from "../store";
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  useStore.setState({
+    vault: { path: "/old-vault", name: "Old", epoch: 1 },
+    serverUrl: "https://one.example",
+    syncEnabled: true,
+    organizations: [{ id: "same-org-id", name: "Old", slug: "old" }],
+    refreshVault: vi.fn(async () => {}),
+    refreshBillingConfig: vi.fn(async () => {}),
+    refreshOrgBilling: vi.fn(async () => {}),
+    enableSyncForVault: vi.fn(async () => {}),
+  });
+});
+
+it("flushes and stops the old vault before changing server, even for identical org IDs", async () => {
+  await useStore.getState().setServerUrl("https://two.example");
+  expect(mocks.flush.mock.invocationCallOrder[0]).toBeLessThan(mocks.disable.mock.invocationCallOrder[0]);
+  expect(mocks.disable.mock.invocationCallOrder[0]).toBeLessThan(mocks.setServerUrl.mock.invocationCallOrder[0]);
+  expect(useStore.getState().vault).toBeNull();
+  expect(useStore.getState().syncEnabled).toBe(false);
+  expect(useStore.getState().organizations).toEqual([]);
+  expect(useStore.getState().enableSyncForVault).not.toHaveBeenCalled();
+  expect(useStore.getState().session?.user.id).toBe("new-user");
+});
+
+it("aborts a switch if unsaved local content cannot be flushed", async () => {
+  mocks.flush.mockRejectedValueOnce(Error("disk full"));
+  await expect(useStore.getState().setServerUrl("https://two.example")).rejects.toThrow("disk full");
+  expect(mocks.disable).not.toHaveBeenCalled();
+  expect(mocks.setServerUrl).not.toHaveBeenCalled();
+  expect(useStore.getState().vault?.path).toBe("/old-vault");
+});
+
+it("retains the current folder when reconnecting to the same server", async () => {
+  await useStore.getState().setServerUrl("https://one.example/");
+  expect(mocks.disable.mock.invocationCallOrder[0]).toBeLessThan(mocks.setServerUrl.mock.invocationCallOrder[0]);
+  expect(useStore.getState().vault?.path).toBe("/old-vault");
+  expect(useStore.getState().enableSyncForVault).toHaveBeenCalledOnce();
+});

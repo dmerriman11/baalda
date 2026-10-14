@@ -1445,3 +1445,69 @@ describe("one-step file upload (files-with-bytes)", () => {
     expect(rig.registered).toEqual([]);
   });
 });
+
+describe("tree binaries a download can never settle", () => {
+  it("never plans a tree binary under a build dir Rust refuses to write", () => {
+    const server: ServerBlob[] = [
+      { id: "b1", docId: "f1", relPath: "Tools/app/node_modules/pkg/logo.png", sha256: "s1" },
+      { id: "b2", docId: "f2", relPath: "Tools/app/build/report.pdf", sha256: "s2" },
+      { id: "b3", docId: "f3", relPath: "Tools/app/report.pdf", sha256: "s3" },
+    ];
+    expect(diffAttachments([], server).toDownload.map((b) => b.id)).toEqual(["b3"]);
+  });
+
+  it("downloads once, and a row whose bytes never match its sha is not fetched again", async () => {
+    const { deps, local } = makeDeps([], [
+      { id: "blob-bad", relPath: "Team/deck.pdf", bytes: new Uint8Array([1, 2]) },
+      { id: "blob-ok", relPath: "Team/sheet.pdf", bytes: new Uint8Array([3, 4]) },
+    ]);
+    const listServer = deps.listServer;
+    deps.listServer = async () =>
+      (await listServer()).map((b) => ({ ...b, docId: `doc-${b.id}` }));
+    const bases = new Map<string, string>();
+    const ids = new Map<string, string>();
+    deps.fileBase = (id) => bases.get(id) ?? null;
+    deps.setFileBase = (id, sha) => void bases.set(id, sha);
+    deps.knownFileId = (p) => ids.get(p) ?? null;
+    deps.rememberFileId = (p, id) => void ids.set(p, id);
+    let fetches = 0;
+    deps.writeTreeLocal = async (relPath, bytes) => {
+      if (relPath === "Team/deck.pdf") {
+        throw new Error("downloaded bytes hash to abc123, expected def456");
+      }
+      local.set(relPath, bytes);
+    };
+    const download = deps.downloadServer;
+    deps.downloadServer = async (id) => {
+      fetches++;
+      return download(id);
+    };
+    const sync = new AttachmentSync(deps);
+
+    expect(await sync.reconcile()).toEqual({ uploaded: 0, downloaded: 1 });
+    expect(fetches).toBe(2);
+    // The good one recorded its base, so pass 2 agrees with the server.
+    expect(bases.get("doc-blob-ok")).toBe("sha-3.4");
+    expect(ids.get("Team/sheet.pdf")).toBe("doc-blob-ok");
+
+    // Pass 2 plans nothing: no re-fetch of either file.
+    expect(await sync.reconcile()).toEqual({ uploaded: 0, downloaded: 0 });
+    expect(fetches).toBe(2);
+    expect(local.has("Team/deck.pdf")).toBe(false);
+  });
+
+  it("retries a transient download failure on the next pass", async () => {
+    const { deps, local } = makeDeps([], [
+      { id: "blob-1", relPath: "Team/deck.pdf", bytes: new Uint8Array([1]) },
+    ]);
+    let fail = true;
+    deps.writeTreeLocal = async (relPath, bytes) => {
+      if (fail) throw new Error("download failed: HTTP 503");
+      local.set(relPath, bytes);
+    };
+    const sync = new AttachmentSync(deps);
+    expect(await sync.reconcile()).toEqual({ uploaded: 0, downloaded: 0 });
+    fail = false;
+    expect(await sync.reconcile()).toEqual({ uploaded: 0, downloaded: 1 });
+  });
+});

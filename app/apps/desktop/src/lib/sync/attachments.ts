@@ -163,12 +163,40 @@ export function isUnderAttachments(relPath: string): boolean {
  * the authority, including the denied build dirs this side does not enumerate;
  * this filter is what keeps the pass from queueing work Rust will refuse.
  */
+/** Mirrors `DENIED_DIRS` in src-tauri/src/vault.rs (and `sync/inbound.ts`). */
+const TREE_DENIED_DIRS = ["node_modules", "dist", "build", "target", "vendor", "__pycache__", "venv"];
+
+/**
+ * Download failures retrying cannot fix while the server row stays the same:
+ * the bytes behind the row do not hash to the sha the listing names, or Rust
+ * refuses the path outright. Anything else (network, 5xx, 403) retries.
+ */
+export function isPermanentDownloadFailure(e: unknown): boolean {
+  const msg =
+    e instanceof Error
+      ? e.message
+      : typeof e === "string"
+        ? e
+        : typeof (e as { message?: unknown })?.message === "string"
+          ? (e as { message: string }).message
+          : String(e ?? "");
+  return (
+    /downloaded bytes hash to [0-9a-f]+, expected/i.test(msg) ||
+    /not a syncable binary file type/i.test(msg) ||
+    /invalid tree binary path/i.test(msg)
+  );
+}
+
 export function isSafeTreeBinaryRelPath(relPath: string): boolean {
   if (!relPath) return false;
   const parts = relPath.split(/[\\/]/);
   if (parts.length === 0) return false;
   if (!parts.every((seg) => seg !== "" && seg !== "." && seg !== ".." && !seg.startsWith(".")))
     return false;
+  // Rust's `ensure_tree_binary_rel` refuses these build dirs (`vault.rs
+  // DENIED_DIRS`). A row an older client registered there would otherwise be
+  // planned on every pass, presigned, refused by Rust and planned again.
+  if (parts.some((seg) => TREE_DENIED_DIRS.includes(seg))) return false;
   if (isNoteExt(relPath)) return false;
   // Another device's Office lock file (`~$Report.docx`, #265), registered by a
   // client that predates the ignore rule: never pulled onto this disk. Its row
@@ -1124,6 +1152,13 @@ export class AttachmentSync {
   private readonly bases = new Map<string, string>();
   /** `files` ids already reported as restored this session (one notice each). */
   private readonly restoreNoticed = new Set<string>();
+  /**
+   * Blob id → sha of server rows whose download failed for good
+   * ({@link isPermanentDownloadFailure}). Skipped while the row still names the
+   * same sha; a re-upload (new sha) is tried again. Without it such a row was
+   * presigned and fetched on EVERY pass and never recorded a base.
+   */
+  private readonly undownloadable = new Map<string, string>();
 
   constructor(
     private readonly deps: AttachmentSyncDeps,
@@ -1495,6 +1530,7 @@ export class AttachmentSync {
     const downloads: ServerBlob[] = [];
     for (const b of toDownload) {
       if (this.attachmentSyncBlocked && b.relPath && !isUnderAttachments(b.relPath)) continue;
+      if (this.undownloadable.get(b.id) === b.sha256) continue;
       if (b.relPath && this.deps.isDeletePending?.(b.relPath)) {
         console.info(`[attachments] ${b.relPath} has a delete pending — not downloading it back`);
         continue;
@@ -1709,7 +1745,15 @@ export class AttachmentSync {
           this.deps.onDownloadSettled?.("ok");
         } catch (e) {
           this.handleAttachmentSyncRequired(e);
-          console.error("[attachments] download failed", b.relPath, e);
+          if (isPermanentDownloadFailure(e)) {
+            this.undownloadable.set(b.id, b.sha256);
+            console.warn(
+              `[attachments] ${b.relPath} cannot be downloaded as listed — not retrying until the server's copy changes`,
+              e,
+            );
+          } else {
+            console.error("[attachments] download failed", b.relPath, e);
+          }
           // The dot stays `syncing` — like a failed upload, `error` is reserved
           // for a refusal retrying cannot fix, and the next pass tries again.
           settled++;

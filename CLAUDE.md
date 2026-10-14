@@ -207,6 +207,10 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   `NoteBridge.writeThrough`); with no local CRDT the file stays 0 bytes and hydrates lazily on open or
   from the vault channel's backfill. Each path it creates is remembered for exactly one watcher echo
   (`consumeMaterialized`), so the app's own placeholder is never mistaken for an external edit.
+  Registry pulls are collapsed (`VaultRegistry.pull`: requests made while a pull runs join one trailing
+  pull) and teammate-driven ones (`registry-frame`/`meta-frame`) start no sooner than
+  `REGISTRY_FRAME_PULL_MIN_GAP_MS` (2 s) after the last pull ended; local, reconnect and ACL reasons keep
+  the 250 ms path; one pull is one paged `/api/notes` listing (5000 per page, the server's cap).
 - `tokenRefresh.ts` — re-mint 60s before JWT expiry. `attachments.ts` — content-hash (sha256) diff, upload/download.
 - **External writers are first-class** (`handleLocalFileChanged` in `docSession.ts`): a watcher event for a
   non-open note routes to the sync layer — unmapped/structural changes trigger the debounced registry pull
@@ -260,6 +264,9 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   by the server on every reconnect. A transient push failure (timeout, network, 5xx) is listed only
   after 3 attempts or 5 min (`sync/failureGrace.ts`), and any `registry.markPushed` clears the doc's
   non-permanent failure rows, so Activity never says Failed beside a synced dot.
+  `listEmptyDocs` probes only live `notes` rows (never `files` ids, which have no Yjs content), and past
+  the 2000 cap it names a stable set: the lowest `md5(id || UTC-day)`, the same on every connect that
+  day and a different window the next.
 - **`ready.behind` is the other authority** (`SyncManager.handleServerBehind`, #98): the server's backfill
   diff (`loadDocDiff`) treats a client whose state vector *covers* the server's as up to date — unequal is
   not behind — and flags `clientAhead` when the client holds ops the server never received; those docs are
@@ -291,6 +298,13 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   base sha persisted as `config.json fileBases`: local==base ⇒ download the teammate's version,
   server==base ⇒ upload with `baseSha` (server 409 `stale_base` if it moved on), no base or both
   changed ⇒ server canonical, local copy to `.context/trash` (`copy_to_trash`) first — never a flip.
+  `isSafeTreeBinaryRelPath` must reject everything Rust's `ensure_tree_binary_rel` refuses (including
+  `DENIED_DIRS`). A download that fails permanently (sha mismatch or path refusal) is remembered per
+  blob id+sha (`undownloadable`) and not retried until the server's sha changes. Uploads verify what
+  they stream: Rust's `VerifyingReader` hashes and counts the PUT body against the intent's sha/size and
+  fails with `file changed during upload` (never completed; the path's cached sha is dropped), and the
+  sync pass skips a binary modified within `UPLOAD_QUIET_MS` (3 s), retrying on one shared settle
+  timer. Multipart parts check length only.
   A local binary this device knows by a `files` id the server TOMBSTONED (`GET /vaults/:id/file-tombstones`,
   ids from `file_tombstones` with no live row) is `toTrash`: copied to `.context/trash`, removed, its id
   forgotten — never re-uploaded, which used to undo a teammate's delete (#215). Id match only; a

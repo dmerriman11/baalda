@@ -520,13 +520,26 @@ pub fn delete_folder_if_empty(vault: &Path, rel: &str) -> AppResult<bool> {
         for entry in entries.flatten() {
             let name = entry.file_name();
             if OS_METADATA_FILES.iter().any(|m| name == *m) {
-                let _ = std::fs::remove_file(entry.path());
+                if let Err(error) = std::fs::remove_file(entry.path()) {
+                    if error.kind() != std::io::ErrorKind::NotFound {
+                        return Err(error.into());
+                    }
+                }
             }
         }
     }
-    // Any failure (non-empty, permissions, races) means "leave it": a folder
-    // that lingers is cosmetic, a reconcile pass that fails over it is not.
-    Ok(std::fs::remove_dir(&abs).is_ok())
+    // Non-empty means local content still protects this folder. An I/O failure
+    // is different: callers must retry the deleted identity, not mistake a
+    // Windows sharing violation or permission failure for new local content.
+    match std::fs::remove_dir(&abs) {
+        Ok(()) => Ok(true),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::DirectoryNotEmpty | std::io::ErrorKind::NotFound
+            ) => Ok(false),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Per-folder metadata the OS's file browser writes on its own. Never vault
@@ -1194,6 +1207,24 @@ mod tests {
         // Ignored dirs and traversal are refused loudly.
         assert!(delete_folder_if_empty(tmp.path(), ".context/trash").is_err());
         assert!(delete_folder_if_empty(tmp.path(), "../up").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_folder_if_empty_reports_io_failure_for_retry() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("Folder")).unwrap();
+        let original = std::fs::metadata(tmp.path()).unwrap().permissions();
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+        let result = delete_folder_if_empty(tmp.path(), "Folder");
+        std::fs::set_permissions(tmp.path(), original).unwrap();
+        assert!(
+            result.is_err(),
+            "I/O failure must not be treated as local content"
+        );
+        assert!(tmp.path().join("Folder").exists());
+        assert!(delete_folder_if_empty(tmp.path(), "Folder").unwrap());
     }
 
     #[test]

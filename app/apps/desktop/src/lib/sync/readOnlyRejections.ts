@@ -119,6 +119,17 @@ export class ReadOnlyRejections {
         }
       }
       if (local == null) local = await this.deps.localText(docId);
+      // Match the bridge's empty-write guard. A read-only recovery is not
+      // authority to erase populated local content merely because the pulled
+      // server document has no text (for example during an interrupted upload
+      // or access transition). Keep both durable bytes and CRDT history until
+      // a populated state arrives; the normal window bounds subsequent retries.
+      if (
+        server.text.length === 0 &&
+        ((local?.length ?? 0) > 0 || ((await this.deps.localText(docId))?.length ?? 0) > 0)
+      ) {
+        return false;
+      }
       const edited = (this.deps.userEdited ?? hasLocalEdit)(docId);
       const hasText = local != null && local.trim().length > 0;
       let saved = false;

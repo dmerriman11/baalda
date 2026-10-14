@@ -837,6 +837,27 @@ describe("inbound delete", () => {
 
 
 describe("inbound folder deletion", () => {
+  it("retries a failed remote folder removal without registering a replacement, including after restart", async () => {
+    const disk = new FakeDisk();
+    disk.folders.add("Team");
+    disk.folders.add("Team/Sub");
+    const { api } = await twoPasses({
+      disk,
+      first: { notes: [], folders: [{ id: "f1", path: "Team" }, { id: "f2", path: "Team/Sub" }] },
+      then: { notes: [], folders: [], folderTombstones: ["f1", "f2"] },
+      patch: () => vi.mocked(ipc.deleteFolderIfEmpty).mockRejectedValueOnce(new Error("directory temporarily busy")),
+    });
+    expect(api.createFolder).not.toHaveBeenCalled();
+    expect(disk.folders.has("Team")).toBe(true);
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+    vi.mocked(ipc.getVaultConfig).mockResolvedValue(writes[writes.length - 1][0]);
+    const restarted = new VaultRegistry(api);
+    restarted.setInboundHost(recordingHost().host);
+    await restarted.reconcile({ organizationId: ORG, vaultName: "v" });
+    expect(api.createFolder).not.toHaveBeenCalled();
+    expect(disk.folders.has("Team")).toBe(false);
+  });
+
   it("removes an emptied local folder the server deleted and does not re-register it", async () => {
     // THE reappearing-folder bug, end to end: without a tombstone this device
     // saw "missing from the server" and re-registered the folder, resurrecting

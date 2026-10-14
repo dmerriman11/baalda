@@ -90,6 +90,17 @@ describe("keptLocally, read-only", () => {
       "2 notes are kept on this device only: you no longer have access, or can only read them. Copies are in .context/trash.",
     );
   });
+  it("describes notes and binaries separately when one group mixes them", () => {
+    const [line] = summarizeReconcile([
+      item({ kind: "keptLocally", path: "a.md", docId: "1", detail: RO }),
+      item({ kind: "keptLocally", path: "report.pdf", detail: ".context/trash/s/report.pdf" }),
+    ]);
+    expect(line.count).toBe(2);
+    expect(line.text).toBe(
+      "1 note is read-only for you, so your edit was not accepted. A copy is in .context/trash. " +
+        "1 file was moved to .context/trash because access was removed. You can find the recovery copies in Activity.",
+    );
+  });
 });
 
 describe("externalEditSaved", () => {

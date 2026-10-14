@@ -61,6 +61,23 @@ export function dedupeReconcileItems(items: readonly ReconcileItem[]): Reconcile
   return [...byKey.values()];
 }
 
+/** `keptLocally` wording for NOTES only. Two causes share this kind: access
+ *  removed (D7), and a read-only note whose edit the server refused. The
+ *  wording must not claim lost access for the second — the user can still
+ *  read the note. */
+function keptNotesLine(group: ReconcileItem[]): string {
+  const n = group.length;
+  const one = n === 1;
+  const ro = group.filter((it) => it.detail === READ_ONLY_DETAIL).length;
+  if (ro === 0) {
+    return `${notes(n)} ${one ? "is" : "are"} kept on this device only: you no longer have access.`;
+  }
+  if (ro === n) {
+    return `${notes(n)} ${one ? "is" : "are"} read-only for you, so your ${one ? "edit was" : "edits were"} not accepted. A copy is in .context/trash.`;
+  }
+  return `${notes(n)} ${one ? "is" : "are"} kept on this device only: you no longer have access, or can only read ${one ? "it" : "them"}. Copies are in .context/trash.`;
+}
+
 function lineFor(kind: ReconcileKind, group: ReconcileItem[]): string {
   const n = group.length;
   const one = n === 1;
@@ -92,20 +109,20 @@ function lineFor(kind: ReconcileKind, group: ReconcileItem[]): string {
       return `${notes(n)} were renamed to avoid a clash with a teammate's note.`;
     }
     case "keptLocally": {
-      if (group.some((it) => !isNoteExt(it.path))) {
-        return `${items} ${one ? "was" : "were"} moved to .context/trash because access was removed. You can find the recovery copies in Activity.`;
+      // A group can mix notes and binaries: describe each kind on its own, so a
+      // read-only note's refused edit never inherits the binaries' "access was
+      // removed" wording (or vice versa).
+      const files = group.filter((it) => !isNoteExt(it.path)).length;
+      const noteItems = group.filter((it) => isNoteExt(it.path));
+      const parts: string[] = [];
+      if (noteItems.length > 0) parts.push(keptNotesLine(noteItems));
+      if (files > 0) {
+        const oneFile = files === 1;
+        parts.push(
+          `${files.toLocaleString()} ${oneFile ? "file was" : "files were"} moved to .context/trash because access was removed. You can find the recovery copies in Activity.`,
+        );
       }
-      // Two causes share this kind: access removed (D7), and a read-only note
-      // whose edit the server refused. The wording must not claim lost access
-      // for the second — the user can still read the note.
-      const ro = group.filter((it) => it.detail === READ_ONLY_DETAIL).length;
-      if (ro === 0) {
-        return `${notes(n)} ${one ? "is" : "are"} kept on this device only: you no longer have access.`;
-      }
-      if (ro === n) {
-        return `${notes(n)} ${one ? "is" : "are"} read-only for you, so your ${one ? "edit was" : "edits were"} not accepted. A copy is in .context/trash.`;
-      }
-      return `${notes(n)} ${one ? "is" : "are"} kept on this device only: you no longer have access, or can only read ${one ? "it" : "them"}. Copies are in .context/trash.`;
+      return parts.join(" ");
     }
     case "selfRevoked":
       return `You removed your own access to ${items}; ${one ? "its copy stays" : "their copies stay"} on this device.`;

@@ -211,6 +211,7 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
   pull) and teammate-driven ones (`registry-frame`/`meta-frame`) start no sooner than
   `REGISTRY_FRAME_PULL_MIN_GAP_MS` (2 s) after the last pull ended; local, reconnect and ACL reasons keep
   the 250 ms path; one pull is one paged `/api/notes` listing (5000 per page, the server's cap).
+  Windows-unsafe server paths (trailing dot/space, reserved device names, `<>:"|?*`, over 200 characters; `sync/windowsPaths.ts`) are skipped with one warning per path per session, never retried, by inbound folder creation/materialize, the bootstrap content apply, tree-binary downloads and inbound renames (the old local path stays); outbound never registers a Windows-stripped twin of a server name. `consumeMaterialized` matches echoes ignoring case and Unicode form, and on Windows with trailing dots and spaces stripped. After 3 consecutive registry pulls that change nothing, `watcher` (folder-only batches), `reauth` and `register-failed` pulls back off 2 s → 30 s; a watcher batch with a real file change stays within 2 s; any changing pull, a user-action reason or teardown releases it. Pulls also wait while a disk-delete drain is pairing moves.
 - `tokenRefresh.ts` — re-mint 60s before JWT expiry. `attachments.ts` — content-hash (sha256) diff, upload/download.
 - **External writers are first-class** (`handleLocalFileChanged` in `docSession.ts`): a watcher event for a
   non-open note routes to the sync layer — unmapped/structural changes trigger the debounced registry pull

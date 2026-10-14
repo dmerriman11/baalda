@@ -1,3 +1,4 @@
+import { setAuditActor, withAuditActor } from "../../audit/access.js";
 import { randomBytes, randomUUID } from "node:crypto";
 import { Hono } from "hono";
 import { pool } from "../../db/pool.js";
@@ -144,6 +145,7 @@ async function revokeMembership(
   orgId: string,
   userId: string,
   reason: "removed" | "left",
+  actorUserId: string,
 ): Promise<void> {
   // Snapshot the org's docs so we can kill any live sockets the departing
   // member holds. closeConnections on a doc with no live socket is a cheap
@@ -165,6 +167,7 @@ async function revokeMembership(
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+    await setAuditActor(client, actorUserId);
     await client.query(`DELETE FROM member WHERE "organizationId" = $1 AND "userId" = $2`, [
       orgId,
       userId,
@@ -577,6 +580,7 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
+      await setAuditActor(client, session.userId);
       await client.query(
         `INSERT INTO member (id, "organizationId", "userId", role, "createdAt")
          VALUES ($1, $2, $3, $4, now())`,
@@ -846,7 +850,7 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
       return c.json({ error: "Only the owner can remove an admin" }, 403);
     }
 
-    await revokeMembership(deps, orgId, targetUserId, "removed");
+    await revokeMembership(deps, orgId, targetUserId, "removed", session.userId);
     await onMembershipTrimmed(pool, orgId);
     return c.json({ removed: true });
   });
@@ -895,7 +899,7 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
     const me = people.find((p) => p.email === session.email) ?? people.find((p) => p.role !== "owner") ?? null;
     const orgName = people[0]?.org_name ?? "your vault";
 
-    await revokeMembership(deps, orgId, session.userId, "left");
+    await revokeMembership(deps, orgId, session.userId, "left", session.userId);
     await onMembershipTrimmed(pool, orgId);
 
     // Fire-and-forget, after the commit: a mail failure must never undo or
@@ -976,11 +980,10 @@ export function createOrgRoutes(deps: OrgDeps): Hono {
         )
       : { rows: [] as Array<{ id: string; vault_id: string }> };
 
-    await pool.query(`UPDATE member SET role = $1 WHERE "organizationId" = $2 AND "userId" = $3`, [
-      role,
-      orgId,
-      targetUserId,
-    ]);
+    await withAuditActor(session.userId, client => client.query(
+      `UPDATE member SET role = $1 WHERE "organizationId" = $2 AND "userId" = $3`,
+      [role, orgId, targetUserId],
+    ));
 
     // A role change flips effective permissions in BOTH directions, but the
     // `readOnly` flag is baked into the sync token and only checked at connect

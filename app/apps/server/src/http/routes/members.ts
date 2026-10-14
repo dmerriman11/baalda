@@ -1,3 +1,4 @@
+import { setAuditActor } from "../../audit/access.js";
 // SPDX-License-Identifier: Apache-2.0
 import { Hono } from "hono";
 import { APIError } from "better-auth/api";
@@ -539,6 +540,7 @@ export function createMemberShareRoutes(deps: AccessChangeDeps = {}) {
     let removed = 0;
     try {
       await client.query("BEGIN");
+      await setAuditActor(client, session.userId);
       const res = await client.query(
         `DELETE FROM shares WHERE org_id = $1 AND principal_type = 'user' AND principal_id = $2`,
         [orgId, targetId],

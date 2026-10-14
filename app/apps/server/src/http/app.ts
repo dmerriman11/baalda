@@ -1,3 +1,6 @@
+import { getSession } from "./session.js";
+import { auditRequestActor, attributeMembershipEvent } from "../audit/access.js";
+import { accessAuditRoutes } from "./routes/access-audit.js";
 import { Hono } from "hono";
 import { readFileSync } from "node:fs";
 import { NOTES_WITH_STATE_FEATURE } from "../registry/seed-on-register.js";
@@ -312,7 +315,19 @@ export function createApp(deps: AppDeps): Hono {
   // Better Auth owns everything under /api/auth (web-standard Request handler).
   // Email sign-in passes the per-account failure throttle first (#237).
   app.post("/api/auth/sign-in/email", (c) => throttledSignIn(c.req.raw, auth.handler));
-  app.on(["GET", "POST"], "/api/auth/*", (c) => auth.handler(c.req.raw));
+  app.on(["GET", "POST"], "/api/auth/*", async (c) => {
+    if (c.req.method !== "POST" || !c.req.path.startsWith("/api/auth/organization/")) {
+      return auth.handler(c.req.raw);
+    }
+    const session = await getSession(c);
+    const response = await auditRequestActor.run(session?.userId ?? null, () => auth.handler(c.req.raw));
+    // Better Auth's leave endpoint bypasses its afterRemoveMember hook.
+    if (session && response.ok && c.req.path === "/api/auth/organization/leave") {
+      const member = await response.clone().json() as { id?: string };
+      if (member.id) await attributeMembershipEvent(member.id, "delete", session.userId);
+    }
+    return response;
+  });
 
   // Desktop Google sign-in handoff — deliberately NOT under /api/auth (the
   // catch-all above would shadow it). See desktop-oauth.ts.
@@ -322,6 +337,7 @@ export function createApp(deps: AppDeps): Hono {
   // sidesteps Better Auth's verified-email gate on list-user-invitations.
   app.route("/api", invitationRoutes);
   app.route("/api", memberRoutes);
+  app.route("/api", accessAuditRoutes);
   app.route("/api", createAppearanceRoutes(deps));
   app.route(
     "/api",

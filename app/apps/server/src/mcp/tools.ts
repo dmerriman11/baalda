@@ -1,3 +1,4 @@
+import { listAccessAudit } from "../audit/access.js";
 import {
   McpToolError,
   appendNote,
@@ -320,7 +321,7 @@ export const TOOLS: McpTool[] = [
   {
     name: "list_folders",
     annotations: { title: "List folders", ...READ },
-    description: "List every folder in a vault, with its path and parent.",
+    description: "List folders you can access in a vault, with their paths and parents.",
     inputSchema: {
       type: "object",
       properties: { vaultId: S("Vault id from list_vaults") },
@@ -586,6 +587,32 @@ export const TOOLS: McpTool[] = [
       additionalProperties: false,
     },
     handler: (ctx, a) => moveFileTool(ctx, reqStr(a, "fileId"), reqStr(a, "path")),
+  },
+  {
+    name: "list_access_audit",
+    annotations: { title: "List access history", ...READ },
+    description: "List access and membership changes in this vault, newest first, with actor, time and before/after values. Owners/admins only. History starts when the server installs audit logging; a null actor means unknown/system. Pass nextCursor as before for the next page.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        before: S("Cursor from nextCursor"),
+        limit: { type: "integer", minimum: 1, maximum: 200 },
+      },
+      additionalProperties: false,
+    },
+    handler: async (ctx, a) => {
+      try {
+        return await listAccessAudit(ctx.auth.organizationId, ctx.auth.userId, {
+          before: optStr(a, "before"),
+          limit: typeof a.limit === "number" ? a.limit : undefined,
+        });
+      } catch (error) {
+        if (["access_manager_required", "invalid_cursor", "invalid_limit"].includes((error as Error).message)) {
+          throw new McpToolError((error as Error).message);
+        }
+        throw error;
+      }
+    },
   },
   {
     name: "create_folder",

@@ -84,10 +84,15 @@ async function enabled(): Promise<SyncManager> {
 }
 
 /** Every pull "changes" what `changed()` says, then re-asks for `reason`. */
-function loop(sm: SyncManager, reason: "reauth" | "watcher", changed: () => boolean): void {
+function loop(
+  sm: SyncManager,
+  reason: "reauth" | "watcher",
+  changed: () => boolean,
+  fileChange = false,
+): void {
   fakeRegistry.pull.mockReset().mockImplementation(async () => {
     const c = changed();
-    setTimeout(() => sm.handleRegistryChanged(reason), 0);
+    setTimeout(() => sm.handleRegistryChanged(reason, { fileChange }), 0);
     return c;
   });
 }
@@ -114,15 +119,27 @@ describe("SyncManager — idle registry pull brake", () => {
     vi.useRealTimers();
   });
 
-  it("keeps a watcher pull within ~2 s even when braked", async () => {
+  it("gives folder-only watcher re-arms the full backoff", async () => {
     const sm = await enabled();
     loop(sm, "watcher", () => false);
     fakeRegistry.pull.mockClear();
     sm.handleRegistryChanged("watcher");
-    await vi.advanceTimersByTimeAsync(20_000);
-    const n = fakeRegistry.pull.mock.calls.length;
-    expect(n).toBeGreaterThanOrEqual(8);
-    expect(n).toBeLessThanOrEqual(12);
+    await vi.advanceTimersByTimeAsync(120_000);
+    // 3 at full speed, then 2, 4, 8, 16, 30, 30 s gaps (unbraked: ~57 at the observed 2.1 s).
+    expect(fakeRegistry.pull.mock.calls.length).toBeLessThanOrEqual(9);
+    sm.disable();
+    vi.useRealTimers();
+  });
+
+  it("a watcher batch with a real file still pulls within 2 s while braked", async () => {
+    const sm = await enabled();
+    loop(sm, "watcher", () => false);
+    sm.handleRegistryChanged("watcher");
+    await vi.advanceTimersByTimeAsync(120_000); // braked deep into the backoff
+    fakeRegistry.pull.mockReset().mockResolvedValue(false);
+    sm.handleRegistryChanged("watcher", { fileChange: true });
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(fakeRegistry.pull).toHaveBeenCalledTimes(1);
     sm.disable();
     vi.useRealTimers();
   });

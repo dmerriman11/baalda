@@ -287,8 +287,9 @@ const GAP_DELAYED_PULL_REASONS: ReadonlySet<RegistryPullReason> = new Set<Regist
  * The idle-pull brake (defence in depth against a client-local loop). After
  * {@link REGISTRY_PULL_BRAKE_AFTER} consecutive pulls that changed nothing, a
  * locally-caused re-arm (watcher, reauth, a retry) waits 2 s → 4 s → … → 30 s
- * after the last pull ended instead of 250ms. A watcher request waits at most
- * 2 s so a real new local file still registers promptly. Teammate frames and
+ * after the last pull ended instead of 250ms. A watcher batch with a real file
+ * change waits at most 2 s so a new local file still registers promptly;
+ * folder-only batches take the full backoff. Teammate frames and
  * user actions are not braked; any pull that changes something releases it.
  */
 export const REGISTRY_PULL_BRAKE_AFTER = 3;
@@ -1600,7 +1601,7 @@ export class SyncManager implements InboundHost {
    * Public like `handleAttachmentChanged` — both are "an external signal for this
    * vault arrived"; the vault engine wires this one in `startVaultEngine`.
    */
-  handleRegistryChanged(reason: RegistryPullReason): void {
+  handleRegistryChanged(reason: RegistryPullReason, opts?: { fileChange?: boolean }): void {
     // A reconnect, a registry frame or an ACL change may mean the server now
     // holds an embed this device is still waiting for: ask for it now.
     this.embedArrivals?.nudge();
@@ -1620,7 +1621,7 @@ export class SyncManager implements InboundHost {
     // "the server told us the structure moved" from "the server told us to
     // re-mint a token, and we pulled anyway" in #93.
     console.info(`[sync] registry pull requested (${reason})`);
-    this.armRegistryPull(reason);
+    this.armRegistryPull(reason, opts?.fileChange === true);
   }
 
   /**
@@ -1634,7 +1635,7 @@ export class SyncManager implements InboundHost {
     this.registryPullBrakeLogged = false;
   }
 
-  private armRegistryPull(reason: RegistryPullReason): void {
+  private armRegistryPull(reason: RegistryPullReason, fileChange = false): void {
     // A signal that arrives once sync is down (or for the vault we just left) must
     // not even ARM the timer — an armed timer is the thing that outlived the switch
     // in the first place. Requiring a live, current scope is strictly stronger than
@@ -1655,7 +1656,9 @@ export class SyncManager implements InboundHost {
         REGISTRY_PULL_BRAKE_MAX_MS,
         REGISTRY_PULL_BRAKE_BASE_MS * 2 ** Math.min(idle - REGISTRY_PULL_BRAKE_AFTER, 8),
       );
-      if (reason === "watcher") wait = Math.min(wait, REGISTRY_PULL_BRAKE_BASE_MS);
+      // A watcher batch holding a real file change stays within ~2 s; a
+      // folder-only batch (a self-echo's shape) takes the full backoff.
+      if (reason === "watcher" && fileChange) wait = Math.min(wait, REGISTRY_PULL_BRAKE_BASE_MS);
       delay = Math.max(delay, this.registryPullEndedAt + wait - now);
       if (!this.registryPullBrakeLogged) {
         this.registryPullBrakeLogged = true;
@@ -2261,6 +2264,10 @@ export class SyncManager implements InboundHost {
     // used to re-enter `handleRegistryChanged` 200 times per batch — 200 timer
     // teardowns for the single pull that was always going to happen.
     let pullRegistry = false;
+    // A real file (note or tree binary) asked for the pull, not only a folder
+    // `tree` event (which is what a self-echo looks like): kept responsive
+    // under the idle-pull brake.
+    let pullFileChange = false;
     let queuedDelete = false;
     // REMOVALS FIRST, in their own pass. The watcher sorts a batch by path, so
     // whether a rename's `removed` half arrives before its `modified` half is
@@ -2361,6 +2368,7 @@ export class SyncManager implements InboundHost {
           queuedDelete = true; // hold the pull until the drain has decided
         }
         pullRegistry = true;
+        pullFileChange = true; // a real file, not a folder echo
         continue;
       }
       // Belt and braces with the uploader's own `skip`: the open note's editor
@@ -2419,7 +2427,7 @@ export class SyncManager implements InboundHost {
       // rename as a brand-new note — a second doc_id for the same file, and a
       // 0-byte ghost materialized back at the old path. The drain re-arms it.
       if (queuedDelete) this.pullAfterDiskDeletes = true;
-      else this.handleRegistryChanged("watcher");
+      else this.handleRegistryChanged("watcher", { fileChange: pullFileChange });
     }
   }
 

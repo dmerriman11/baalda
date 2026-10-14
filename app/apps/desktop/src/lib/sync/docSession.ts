@@ -264,6 +264,26 @@ const REGISTRY_PULL_MAX_WAIT_MS = 1_000;
 export const REGISTRY_META_PULL_MIN_MS = 30_000;
 
 /**
+ * Minimum gap between the END of one registry pull and the start of the next
+ * one a teammate's `registry` frame asks for. A full pull re-reads the whole
+ * listing (an 11k-note vault is three paged `GET /api/notes` plus folders and
+ * files, several MB), and under steady churn — a teammate and AI agents
+ * creating notes all day — every app in the vault used to re-pull back to back,
+ * one cycle every 0.4–2 s. Frames that land inside the gap, or while a pull is
+ * running, ride ONE trailing pull. Only frame-driven pulls wait: this device's
+ * own structural changes, reconnects, ACL changes and retries keep the 250ms
+ * path, and an urgent request re-arms a gap-delayed timer sooner.
+ */
+export const REGISTRY_FRAME_PULL_MIN_GAP_MS = 2_000;
+
+/** Reasons that are only "a teammate's structure moved" and so may wait for
+ *  {@link REGISTRY_FRAME_PULL_MIN_GAP_MS}. */
+const GAP_DELAYED_PULL_REASONS: ReadonlySet<RegistryPullReason> = new Set<RegistryPullReason>([
+  "registry-frame",
+  "meta-frame",
+]);
+
+/**
  * Consecutive failed registry pulls before Health and the pill say so. The pull
  * is the only path that registers a NEW note or folder; content edits ride
  * their own sockets, so a pull that keeps failing used to look like "edits sync,
@@ -516,6 +536,18 @@ export class SyncManager implements InboundHost {
   /** When the last registry pull was started (any reason). A meta-only frame
    *  inside {@link REGISTRY_META_PULL_MIN_MS} of it is deferred, not dropped. */
   private lastRegistryPullAt = 0;
+  /** When the armed registry pull timer is due (ms epoch); 0 when none. */
+  private registryPullDueAt = 0;
+  /** True while every reason folded into the armed timer is gap-delayed
+   *  ({@link GAP_DELAYED_PULL_REASONS}); one urgent reason clears it. */
+  private registryPullGapOnly = false;
+  /** Registry pulls currently running (any caller of `pullRegistry`). */
+  private registryPullsInFlight = 0;
+  /** When the last registry pull finished (any outcome); 0 before the first. */
+  private registryPullEndedAt = 0;
+  /** A frame-driven pull asked for while one was running: armed (with the
+   *  gap) the moment the running pull ends. */
+  private registryPullTrailing = false;
   /** The deferred meta-only pull, if one is waiting. At most one. */
   private metaPullTimer: ReturnType<typeof setTimeout> | null = null;
   /** UI subscribes here to refetch the Activity feed when the server says the
@@ -1559,6 +1591,15 @@ export class SyncManager implements InboundHost {
     // "the server told us the structure moved" from "the server told us to
     // re-mint a token, and we pulled anyway" in #93.
     console.info(`[sync] registry pull requested (${reason})`);
+    this.armRegistryPull(reason);
+  }
+
+  /**
+   * Arm (or re-arm) the debounced registry pull. Split from
+   * {@link handleRegistryChanged} so the trailing pull a running one owes can
+   * re-arm without repeating that method's side effects and log line.
+   */
+  private armRegistryPull(reason: RegistryPullReason): void {
     // A signal that arrives once sync is down (or for the vault we just left) must
     // not even ARM the timer — an armed timer is the thing that outlived the switch
     // in the first place. Requiring a live, current scope is strictly stronger than
@@ -1566,21 +1607,46 @@ export class SyncManager implements InboundHost {
     const scope = this.scope;
     if (!this.enabled || !scope || !scope.isCurrent()) return;
     const now = Date.now();
+    const gapDelayed = GAP_DELAYED_PULL_REASONS.has(reason);
+    // A teammate's frame waits until the last pull ended at least
+    // REGISTRY_FRAME_PULL_MIN_GAP_MS ago; everything else keeps the 250ms path.
+    const delay = gapDelayed
+      ? Math.max(250, this.registryPullEndedAt + REGISTRY_FRAME_PULL_MIN_GAP_MS - now)
+      : 250;
+    const dueAt = now + delay;
     if (this.registryPullTimer) {
       // Already armed. Re-arming is the coalescing, but only up to a point: past
       // REGISTRY_PULL_MAX_WAIT_MS the frames are a storm, not a burst, and
       // pushing the pull back again would starve it for the storm's duration.
-      // Leave the armed timer alone and let this frame ride the pull it will run.
-      if (now - this.registryPullBurstAt >= REGISTRY_PULL_MAX_WAIT_MS) return;
+      // Leave the armed timer alone and let this frame ride the pull it will run
+      // — unless this request is more urgent than the armed (gap-delayed) one.
+      if (now - this.registryPullBurstAt >= REGISTRY_PULL_MAX_WAIT_MS && dueAt >= this.registryPullDueAt) {
+        if (!gapDelayed) this.registryPullGapOnly = false;
+        return;
+      }
       clearTimeout(this.registryPullTimer);
+      this.registryPullTimer = null;
+      this.registryPullGapOnly = this.registryPullGapOnly && gapDelayed;
     } else {
       this.registryPullBurstAt = now;
+      this.registryPullGapOnly = gapDelayed;
     }
     if (this.rootMissing) return;
+    this.registryPullDueAt = dueAt;
     this.registryPullTimer = setTimeout(() => {
+      const gapOnly = this.registryPullGapOnly;
       this.registryPullTimer = null;
       this.registryPullBurstAt = 0;
+      this.registryPullDueAt = 0;
+      this.registryPullGapOnly = false;
       if (!scope.isCurrent() || this.rootMissing) return;
+      // Only teammates' frames asked, and a pull is already running: it may
+      // have started before their change, so one more is owed — but after it
+      // ends (plus the gap), never queued behind it back to back.
+      if (gapOnly && this.registryPullsInFlight > 0) {
+        this.registryPullTrailing = true;
+        return;
+      }
       // A registered folder vanished and the drain has not paired it yet
       // (#221), or a note did (a rename's departure half, inside its 2.5 s
       // grace): pulling now would register the moved notes as brand-new ones
@@ -1626,7 +1692,7 @@ export class SyncManager implements InboundHost {
           this.settleAfterPull(scope);
         })
         .catch((e) => console.warn("[sync] registry pull failed", e));
-    }, 250);
+    }, delay);
   }
 
   /**
@@ -3863,6 +3929,22 @@ export class SyncManager implements InboundHost {
    * BEFORE the pull starts: only docs parked before then can be judged by it.
    */
   private async pullRegistry(scope: VaultScope): Promise<boolean> {
+    this.registryPullsInFlight++;
+    try {
+      return await this.pullRegistryInner(scope);
+    } finally {
+      this.registryPullsInFlight = Math.max(0, this.registryPullsInFlight - 1);
+      if (this.registryPullsInFlight === 0 && scope.isCurrent()) {
+        this.registryPullEndedAt = Date.now();
+        if (this.registryPullTrailing) {
+          this.registryPullTrailing = false;
+          this.armRegistryPull("registry-frame");
+        }
+      }
+    }
+  }
+
+  private async pullRegistryInner(scope: VaultScope): Promise<boolean> {
     const store = this.docStore;
     const mark = store?.parkMark() ?? 0;
     let changed: boolean;
@@ -6198,6 +6280,11 @@ export class SyncManager implements InboundHost {
       this.registryPullTimer = null;
     }
     this.registryPullBurstAt = 0;
+    this.registryPullDueAt = 0;
+    this.registryPullGapOnly = false;
+    this.registryPullsInFlight = 0;
+    this.registryPullEndedAt = 0;
+    this.registryPullTrailing = false;
     if (this.metaPullTimer) {
       clearTimeout(this.metaPullTimer);
       this.metaPullTimer = null;

@@ -21,7 +21,7 @@
 //   • honest — a per-item failure is retried with backoff and then RECORDED
 //     (`failures()`), so a vault with failures can never report fully synced.
 
-import { UnmaterializablePaths } from "./windowsPaths";
+import { UnmaterializablePaths, isWindowsHost, windowsStrip } from "./windowsPaths";
 import { markAccessTreeStale } from "../accessTreeStale";
 import {
   ACCESS_CHECK_MAX,
@@ -692,6 +692,13 @@ function samePathConflictCap(listed: number): number {
  *  list and the ones in `inbound.ts` and Rust `vault.rs` are what
  *  `__tests__/formatsLockstep.test.ts` compares against the registry, and a
  *  list that imports its own answer cannot drift — nor can it detect drift. */
+
+/** Echo-match key: how the OS may hand back a path we wrote (case, NFC, and on
+ *  Windows stripped trailing dots/spaces). Compare-time only. */
+function echoKey(relPath: string): string {
+  return pathKey(isWindowsHost() ? windowsStrip(relPath) : relPath);
+}
+
 const NOTE_EXTS = ["md", "markdown", "mdx", "txt", "html", "htm", "canvas", "url", "webloc"];
 function isNoteFile(path: string): boolean {
   const ext = path.slice(path.lastIndexOf(".") + 1).toLowerCase();
@@ -1090,6 +1097,8 @@ export class VaultRegistry {
    * first event that arrives for it.
    */
   private materialized = new Set<string>();
+  /** {@link materialized} by `echoKey`, so an OS-respelled echo matches in O(1). */
+  private materializedByKey = new Map<string, string>();
   /**
    * Server paths this OS cannot hold as spelled (Windows: trailing dot/space,
    * reserved device names, forbidden characters, MAX_PATH). Skipped by the
@@ -1405,6 +1414,7 @@ export class VaultRegistry {
     // Paths, so they belong to the vault we are leaving — and a stale entry would
     // suppress the next vault's first watcher event for the same relative path.
     this.materialized.clear();
+    this.materializedByKey.clear();
     this.ownMoves.clear();
     this.ownDeletes.clear();
     this.unhydratedPlaceholders.clear();
@@ -1504,7 +1514,16 @@ export class VaultRegistry {
    * path (a real external edit) is treated normally.
    */
   consumeMaterialized(relPath: string): boolean {
-    return this.materialized.delete(relPath);
+    if (this.materialized.delete(relPath)) {
+      this.materializedByKey.delete(echoKey(relPath));
+      return true;
+    }
+    // The OS may report our write under its own spelling: another case, NFD on
+    // macOS, or (Windows) trailing dots/spaces stripped. Still our echo.
+    const original = this.materializedByKey.get(echoKey(relPath));
+    if (original === undefined || !this.materialized.delete(original)) return false;
+    this.materializedByKey.delete(echoKey(relPath));
+    return true;
   }
 
   /**
@@ -1520,8 +1539,12 @@ export class VaultRegistry {
     // window, the vault was closed) would otherwise pin the entry forever. A
     // vault's worth of placeholders is the natural high-water mark, so a set an
     // order of magnitude past that is stale by definition.
-    if (this.materialized.size > 20_000) this.materialized.clear();
+    if (this.materialized.size > 20_000) {
+      this.materialized.clear();
+      this.materializedByKey.clear();
+    }
     this.materialized.add(relPath);
+    this.materializedByKey.set(echoKey(relPath), relPath);
     this.clearPendingPath(relPath);
   }
 

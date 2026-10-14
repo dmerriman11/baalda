@@ -135,7 +135,7 @@ export function accessText(e: AccessEvent): string {
 export const ACTIVITY_HINT = {
   reconcile: "What sync changed for you after being offline, since Baalda launched.",
   trash: "Deleted on the server. It stays in Trash until purged; Restore brings it back for everyone.",
-  copy: "Local text sync set aside on this device, in .context/trash. It never syncs.",
+  copy: "A local recovery copy in .context/trash. It never syncs.",
   held: "Many notes disappeared from the vault folder at once. Nothing was deleted for your team, and they are being restored here.",
   shrunk: "An edit left at most a fifth of this note. The server kept the text from before it.",
   paused:

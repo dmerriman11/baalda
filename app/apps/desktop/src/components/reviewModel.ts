@@ -4,6 +4,7 @@
    (`sync/reconcileReport.ts` records; this only remembers the user's answers). */
 import type { ReconcileItem, ReconcileKind } from "../lib/sync/reconcileReport";
 import { dedupeReconcileItems } from "../lib/reconcileSummary";
+import { isNoteExt } from "../lib/formats";
 import { reconcileCopyRef, type CopyRef } from "./recoveryCopies";
 
 export type Resolution = "kept" | "restored" | "restoredSibling" | "skipped";
@@ -34,7 +35,9 @@ export function reviewItems(items: readonly ReconcileItem[]): ReviewItem[] {
   const out: ReviewItem[] = [];
   for (const it of dedupeReconcileItems(items)) {
     const copy = reconcileCopyRef(it);
-    if (copy) {
+    // Binary copies are revealed in the file manager from Activity. They must
+    // never enter the text comparison/restore workflow.
+    if (copy && isNoteExt(it.path)) {
       out.push({ key: reviewKey(it), kind: it.kind, path: it.path, copy, otherPath: null, at: it.at });
     } else if (it.kind === "renamedConflict" && it.newPath) {
       out.push({ key: reviewKey(it), kind: it.kind, path: it.path, copy: null, otherPath: it.newPath, at: it.at });

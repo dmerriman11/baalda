@@ -18,6 +18,7 @@ vi.mock("../../ipc", () => ({
   deleteFilesBatch: vi.fn(),
   deleteFolderIfEmpty: vi.fn(),
   fileStat: vi.fn(),
+  binaryExists: vi.fn(),
   getDiskBase: vi.fn(),
   copyToTrash: vi.fn(),
   writeTrashCopy: vi.fn(),
@@ -101,6 +102,7 @@ class FakeDisk {
 }
 
 function install(disk: FakeDisk) {
+  vi.mocked(ipc.binaryExists).mockImplementation(async (path) => disk.binaries.has(path));
   vi.mocked(ipc.deleteFilesBatch).mockImplementation(async (items) => Promise.all(items.map(async (item) => {
     try {
       await ipc.deleteFile(item.path);
@@ -1606,7 +1608,7 @@ describe("a revoked tree binary leaves the disk like a revoked note", () => {
   // had no route at all, because they are in none of the listings the note plan
   // reads.
 
-  it("removes a named, access-checked binary outright and forgets its files row", async () => {
+  it("moves a named, access-checked binary to recovery and forgets its files row", async () => {
     const disk = new FakeDisk();
     disk.notes.set("a.md", "d1");
     disk.binaries.add("Team/report.pdf");
@@ -1620,15 +1622,37 @@ describe("a revoked tree binary leaves the disk like a revoked note", () => {
     });
 
     expect(disk.binaries.has("Team/report.pdf")).toBe(false);
-    expect(disk.deleted).toEqual(["Team/report.pdf"]);
-    expect(disk.trashed).toEqual([]);
+    expect(disk.deleted).toEqual([]);
+    expect(disk.trashed).toEqual([{ from: "Team/report.pdf", to: expect.stringContaining(".context/trash/") }]);
     // The note beside it is untouched: the binary pass reads `localFiles` only.
     expect(disk.notes.has("a.md")).toBe(true);
-    expect(r.filesRemoved).toEqual([{ path: "Team/report.pdf", trashedTo: null }]);
+    expect(r.filesRemoved).toEqual([{ path: "Team/report.pdf", trashedTo: disk.trashed[0].to }]);
     // The mapping goes with the file, or the next `hello` re-announces an id
     // whose file is not here and the server names it revoked on every connect.
     expect(r.reg.getFileId("Team/report.pdf")).toBeNull();
     expect(r.reg.fileDocIds()).toEqual([]);
+    expect(reconcileReport.items()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "keptLocally", docId: "file-1", detail: disk.trashed[0].to }),
+    ]));
+  });
+
+  it("leaves the binary and its identity when recovery storage cannot be written", async () => {
+    const disk = new FakeDisk();
+    disk.notes.set("a.md", "d1");
+    disk.binaries.add("report.pdf");
+    const r = await twoPasses({
+      disk,
+      first: { notes: [{ id: "d1", rel_path: "a.md" }] },
+      then: { notes: [{ id: "d1", rel_path: "a.md" }], tombstones: [] },
+      authority: true,
+      files: { "report.pdf": "file-1" },
+      named: new Set(["file-1"]),
+      patch: () => { vi.mocked(ipc.trashNote).mockRejectedValue(new Error("disk full")); },
+    });
+    expect(disk.binaries.has("report.pdf")).toBe(true);
+    expect(disk.deleted).toEqual([]);
+    expect(r.reg.getFileId("report.pdf")).toBe("file-1");
+    expect(r.filesRemoved).toEqual([]);
   });
 
   it("claims the watcher echo first, so the delete queue never sees it", async () => {
@@ -1735,7 +1759,7 @@ describe("a revoked tree binary leaves the disk like a revoked note", () => {
     expect(disk.binaries.has("Team/report.pdf")).toBe(true);
   });
 
-  it("permanently removes the uploader's revoked binary too", async () => {
+  it("preserves the uploader's revoked binary in recovery too", async () => {
     const disk = new FakeDisk();
     disk.notes.set("mine.md", "d1");
     disk.binaries.add("Team/report.pdf");
@@ -1761,9 +1785,9 @@ describe("a revoked tree binary leaves the disk like a revoked note", () => {
     await reg.reconcile({ organizationId: ORG, vaultName: "v" });
 
     expect(disk.binaries.has("Team/report.pdf")).toBe(false);
-    expect(disk.trashed).toEqual([]);
-    expect(disk.deleted).toEqual(["Team/report.pdf"]);
-    expect(host.filesRemoved).toEqual([{ path: "Team/report.pdf", trashedTo: null }]);
+    expect(disk.deleted).toEqual([]);
+    expect(disk.trashed).toEqual([{ from: "Team/report.pdf", to: expect.stringContaining(".context/trash/") }]);
+    expect(host.filesRemoved).toEqual([{ path: "Team/report.pdf", trashedTo: disk.trashed[0].to }]);
   });
 
   it("keeps a binary whose bytes this device never confirmed upstream", async () => {

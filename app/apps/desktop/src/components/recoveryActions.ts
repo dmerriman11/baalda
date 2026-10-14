@@ -4,12 +4,15 @@
 import * as ipc from "../lib/ipc";
 import { useStore } from "../store";
 import { noteLabel } from "../lib/notePath";
+import { isNoteExt } from "../lib/formats";
+import { toast } from "../lib/toast";
 import { liveView, replaceWholeDoc, waitForLiveView } from "./liveEditorViews";
 import {
   copyTabTitle,
   originalPathOf,
   siblingRecoveredPath,
   stampTime,
+  parseTrashPath,
   type CopyRef,
 } from "./recoveryCopies";
 import { REVIEW_TAB_ID, textTabId, type TextSource } from "./virtualTabs";
@@ -29,6 +32,14 @@ function show(): void {
 }
 
 export function openCopy(ref: CopyRef, modified?: number): void {
+  if (!isNoteExt(ref.relPath)) {
+    const vault = useStore.getState().vault;
+    const path = ipcTrashPath(ref);
+    if (!vault || !parseTrashPath(path)) return;
+    void ipc.revealInFileManager(`${vault.path}/${path}`)
+      .catch(() => toast("Couldn't show the recovery copy.", "error"));
+    return;
+  }
   const source = copySource(ref);
   useStore.getState().openVirtualTab({
     kind: "text",
@@ -87,6 +98,7 @@ export async function replaceNoteText(notePath: string, text: string): Promise<v
 }
 
 export async function restoreCopyReplace(ref: CopyRef, notePath = originalPathOf(ref.relPath)): Promise<void> {
+  if (!isNoteExt(ref.relPath)) throw new Error("Recover this file from its copy in the file manager.");
   const text = await ipc.readTrashCopy(ref.stamp, ref.relPath, epoch());
   await replaceNoteText(notePath, text);
 }
@@ -122,6 +134,7 @@ export async function restoreTextAsSibling(originalPath: string, text: string): 
 }
 
 export async function restoreCopyAsSibling(ref: CopyRef): Promise<string> {
+  if (!isNoteExt(ref.relPath)) throw new Error("Recover this file from its copy in the file manager.");
   const text = await ipc.readTrashCopy(ref.stamp, ref.relPath, epoch());
   return restoreTextAsSibling(originalPathOf(ref.relPath), text);
 }

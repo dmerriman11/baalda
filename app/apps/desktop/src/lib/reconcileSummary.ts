@@ -64,6 +64,7 @@ export function dedupeReconcileItems(items: readonly ReconcileItem[]): Reconcile
 function lineFor(kind: ReconcileKind, group: ReconcileItem[]): string {
   const n = group.length;
   const one = n === 1;
+  const items = group.every((it) => isNoteExt(it.path)) ? notes(n) : `${n.toLocaleString()} ${one ? "file" : "files"}`;
   switch (kind) {
     case "deletedByTeammate":
       return `${notes(n)} you edited offline ${one ? "was" : "were"} deleted by a teammate. Your ${one ? "version is" : "versions are"} in Trash.`;
@@ -91,6 +92,9 @@ function lineFor(kind: ReconcileKind, group: ReconcileItem[]): string {
       return `${notes(n)} were renamed to avoid a clash with a teammate's note.`;
     }
     case "keptLocally": {
+      if (group.some((it) => !isNoteExt(it.path))) {
+        return `${items} ${one ? "was" : "were"} moved to .context/trash because access was removed. You can find the recovery copies in Activity.`;
+      }
       // Two causes share this kind: access removed (D7), and a read-only note
       // whose edit the server refused. The wording must not claim lost access
       // for the second — the user can still read the note.
@@ -104,7 +108,7 @@ function lineFor(kind: ReconcileKind, group: ReconcileItem[]): string {
       return `${notes(n)} ${one ? "is" : "are"} kept on this device only: you no longer have access, or can only read ${one ? "it" : "them"}. Copies are in .context/trash.`;
     }
     case "selfRevoked":
-      return `You removed your own access to ${notes(n)}; ${one ? "its copy stays" : "their copies stay"} on this device.`;
+      return `You removed your own access to ${items}; ${one ? "its copy stays" : "their copies stay"} on this device.`;
     case "externalEditSaved":
       return `${notes(n)} changed by another app while you were offline could not be merged. Your ${one ? "version was" : "versions were"} saved to .context/trash.`;
     case "conflictKeptServer":

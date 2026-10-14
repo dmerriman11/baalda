@@ -22,6 +22,11 @@ const items: ReconcileItem[] = [
 ];
 
 describe("review model", () => {
+  it("does not send binary recovery copies through text review or resolve-all deletion", () => {
+    const binary: ReconcileItem = { kind: "keptLocally", path: "report.pdf", detail: `.context/trash/${S}/report.pdf`, at: 10 };
+    expect(reviewItems([binary])).toEqual([]);
+    expect(planResolveAll(reviewItems([binary]), new Map()).copiesToDelete).toEqual([]);
+  });
   beforeEach(() => reviewState.reset());
 
   it("lists copies and clash renames, newest first, deduped; notices are left out", () => {

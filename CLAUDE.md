@@ -1012,6 +1012,14 @@ Read-only recovery refuses an empty server state over populated local bytes or C
 matching the bridge's empty-write guard. Failed folder removals retain their server identities,
 including parent folders and across restart; filesystem failures are distinct from non-empty folders.
 
+Tree-file authorship uses `files.created_by` consistently in direct, prefetched and indexed
+permission resolution and readable-set listings. Explicit denies and vault postures still apply.
+Migration 057 restores a personal edit grant only for a sole-owner legacy vault with no ACL rows;
+it never grants the organization or changes an explicit rule. Revoked confirmed attachments move
+atomically to `.context/trash` before their identity is forgotten. Failed recovery leaves the
+file and identity intact. Activity reports these copies and reveals binaries in the file manager;
+binary recovery must never use the Markdown comparison or text-restore pipeline.
+
 Account Settings → Connection remembers up to eight normalized server addresses locally,
 with tokens kept only in the per-server OS keychain. One server is active at a time.
 Switching flushes pending edits and closes the previous vault before changing the shared

@@ -101,8 +101,9 @@ function session(orgId = ORG_A): SessionInfo {
 beforeEach(() => {
   vi.useRealTimers();
   fakeRegistry.reset.mockClear();
+  fakeRegistry.setProgressSink.mockClear();
   fakeRegistry.pull.mockClear();
-  fakeRegistry.reconcile.mockClear().mockImplementation(async () => ({ seeded: false }));
+  fakeRegistry.reconcile.mockReset().mockImplementation(async () => ({ seeded: false }));
   // A vault with nothing mapped and nothing confirmed is the neutral starting
   // point; tests that care set these explicitly.
   fakeRegistry.mappedNotes.mockReturnValue([]);

@@ -393,9 +393,13 @@ const DOC_STATUS_OWNS_BADGE: ReadonlySet<SyncStatus> = new Set<SyncStatus>([
 ]);
 
 export class SyncManager implements InboundHost {
-  readonly registry = new VaultRegistry(api);
+  registry = new VaultRegistry(api);
 
   constructor() {
+    this.configureRegistry();
+  }
+
+  private configureRegistry(): void {
     // Every confirmed push, on every path (batch, per-doc uploader, one-step
     // create, open-note confirm), clears that doc's failure rows: the sidebar
     // badge and the failure list must never disagree.
@@ -4832,6 +4836,7 @@ export class SyncManager implements InboundHost {
     // Retire whatever was running for the previous vault BEFORE any await, so no
     // old-vault work can interleave with this reconcile.
     this.teardown();
+    const registry = this.registry;
     const scope = vaultScopes.begin({
       orgId: vault.orgId,
       vaultPath: vault.path,
@@ -4845,11 +4850,11 @@ export class SyncManager implements InboundHost {
     let cleanupActive = false;
     const progress = new SyncProgressReporter({
       onProgress: (p) => {
-        if (cleanupActive) return;
+        if (!scope.isCurrent() || cleanupActive) return;
         this.logRunPhase(p);
         this.onSyncProgress?.(this.withRefusals(this.withUploadBacklog(p)));
       },
-      onDocState: (patch) => this.onDocState?.(patch),
+      onDocState: (patch) => { if (scope.isCurrent()) this.onDocState?.(patch); },
     });
     this.progress = progress;
     // The registry writes into the SHARED reporter, but its COUNTERS are muted
@@ -4860,7 +4865,7 @@ export class SyncManager implements InboundHost {
     // they are keyed by docId, so concurrent writers cannot garble them.
     const cleanup = new SyncProgressReporter({
       onProgress: (p) => {
-        if (!cleanupActive) return;
+        if (!scope.isCurrent() || !cleanupActive) return;
         this.logRunPhase(p);
         this.onSyncProgress?.(p);
       },
@@ -4868,7 +4873,7 @@ export class SyncManager implements InboundHost {
     });
     this.cleanupProgress = cleanup;
     const counterOwned = (): boolean => this.bulkPhase || this.contentRunInFlight() || this.downloadPhase;
-    this.registry.setProgressSink({
+    registry.setProgressSink({
       phase: (p, t) => {
         if (p === "removing") {
           cleanupActive = true;
@@ -4904,7 +4909,7 @@ export class SyncManager implements InboundHost {
     // the doc. Best-effort: a folder with no (or a foreign) stamp doesn't prime,
     // and a broken config must not fail the enable.
     try {
-      if (await this.registry.primeLocal(vault.orgId)) {
+      if (await registry.primeLocal(vault.orgId)) {
         if (!scope.isCurrent()) return { ok: false, reason: "vault changed", scope };
         this.primed = true;
         // Sidebar badges + `store.docIdByPath`, immediately.
@@ -4928,6 +4933,7 @@ export class SyncManager implements InboundHost {
     } catch (e) {
       console.warn("[sync] local prime failed; falling back to reconcile-first", e);
     }
+    if (!scope.isCurrent()) return { ok: false, reason: "vault changed", scope };
     // ---- PHASE B: the networked reconcile. Unchanged. ----
     try {
       // The registry reads the vault tree itself (the FULL recursive walk); it
@@ -4938,13 +4944,13 @@ export class SyncManager implements InboundHost {
       this.enableReconciling = true;
       let reconciled: { seeded: boolean };
       try {
-        reconciled = await this.registry.reconcile({
+        reconciled = await registry.reconcile({
           organizationId: session.activeOrganizationId,
           vaultName: vault.name,
           seedIfEmpty: vault.seedIfEmpty,
         });
       } finally {
-        this.enableReconciling = false;
+        if (scope.isCurrent()) this.enableReconciling = false;
       }
       const { seeded } = reconciled;
       // The user may have switched vaults during the reconcile. Bringing sync up
@@ -4979,7 +4985,7 @@ export class SyncManager implements InboundHost {
       // two id spaces.
       this.lastCrdtSweepAt = Date.now();
       void collectCrdtGarbage(
-        { registryDocIds: () => this.registry.allDocIds() },
+        { registryDocIds: () => registry.allDocIds() },
         { epoch: scope.vaultEpoch ?? undefined, pinned: this.crdtSweepPinned() },
       );
       this.setupAttachments(scope);
@@ -5007,7 +5013,7 @@ export class SyncManager implements InboundHost {
       // Background, like the content run it replaces — `enable` must return as
       // soon as the vault is usable or "Turn on sync" blocks the UI for the
       // whole backfill.
-      if (useBulkPath(this.registry.mappedNotes().length)) {
+      if (useBulkPath(registry.mappedNotes().length)) {
         this.bulkRun = this.runBulkEngine(scope).catch((e) => {
           console.warn("[sync] bulk sync failed", e);
         });
@@ -5016,7 +5022,7 @@ export class SyncManager implements InboundHost {
         // the pull's), but never leave deferred notes without a file.
         void this.materializeDeferred();
       }
-      if (!useBulkPath(this.registry.mappedNotes().length) && this.vaultEngineLiveOnly) {
+      if (!useBulkPath(registry.mappedNotes().length) && this.vaultEngineLiveOnly) {
         // The prime window sized the channel from the LOCAL doc map and put it
         // in live-only mode; the reconcile then found a vault below the
         // threshold. Nothing is going to page it down over HTTP, so give the
@@ -6158,6 +6164,7 @@ export class SyncManager implements InboundHost {
   private teardown(): void {
     this.enabled = false;
     this.primed = false;
+    this.enableReconciling = false;
     // Link refusals name paths in the vault we are leaving.
     resetLinkRefusals();
     // A pending badge hold belongs to the vault we are leaving; letting it fire
@@ -6295,11 +6302,12 @@ export class SyncManager implements InboundHost {
     this.clearVaultPresence();
     this.stopVaultEngine();
     this.closeCurrent();
-    // The registry is a process singleton: a surviving `serverVaultId` + path
-    // maps are precisely what let vault A's ids be applied to vault B's tree.
-    // (`reset` also disposes its config-checkpointer synchronously, so a pending
-    // flush can't write this vault's doc map into the next one.)
-    this.registry.reset();
+    // Never rebind an object with suspended async work to another vault. A
+    // reset alone lets old awaits resume against the next session's live scope.
+    if (this.registry.retire) this.registry.retire();
+    else this.registry.reset(); // lightweight test doubles
+    this.registry = new VaultRegistry(api);
+    this.configureRegistry();
     // Nulls the store's `syncProgress`, so a half-finished count from the vault we
     // just left is never on screen.
     this.cleanupProgress?.dispose();

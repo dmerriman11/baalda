@@ -324,3 +324,18 @@ describe("settings dialogs swap instead of stacking", () => {
     expect(useStore.getState().settingsDialog).toBe("account");
   });
 });
+
+it("a note-open response from the previous vault cannot replace or clear the next vault's selection", async () => {
+  let release!: (value: any) => void;
+  const delayed = new Promise<any>(resolve => { release = resolve; });
+  ipcMock.getNoteMeta.mockReturnValueOnce(delayed);
+  useStore.setState({ vault: { path: "/a", name: "A", epoch: 1 }, openFolderIsSynced: false });
+  const oldOpen = open("Same.md");
+  useStore.setState({ vault: { path: "/b", name: "B", epoch: 2 }, openingNotePath: "Same.md",
+    openNote: { path: "B.md", id: "b-note", title: "B" }, openTabs: ["B.md"] });
+  release({ path: "Same.md", id: "a-note", title: "A" });
+  await oldOpen;
+  expect(useStore.getState().openNote?.id).toBe("b-note");
+  expect(useStore.getState().openTabs).toEqual(["B.md"]);
+  expect(useStore.getState().openingNotePath).toBe("Same.md");
+});

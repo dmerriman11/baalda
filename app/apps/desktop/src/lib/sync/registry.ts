@@ -796,6 +796,7 @@ export class VaultRegistry {
   private prefetchedListings: {
     vaultId: string;
     p: Promise<[FolderRegistry, NoteRegistry]>;
+    startedAt: number;
   } | null = null;
   /** The org this registry is reconciling under (see `VaultSyncConfig.organizationId`). */
   private organizationId: string | null = null;
@@ -876,11 +877,10 @@ export class VaultRegistry {
    * a teammate's brand-new note is new content, not a grant. A row whose
    * creation time the server does not send is not counted.
    */
-  private detectAccessGrants(serverNotes: RegisteredNote[]): void {
-    const now = Date.now();
+  private detectAccessGrants(serverNotes: RegisteredNote[], startedAt: number): void {
     const ids = new Set(serverNotes.map((n) => noteDocId(n)));
     const prev = this.lastListed;
-    this.lastListed = { ids, at: now };
+    this.lastListed = { ids, at: startedAt };
     if (!prev) return;
     const paths: string[] = [];
     for (const n of serverNotes) {
@@ -1340,12 +1340,22 @@ export class VaultRegistry {
     cb(colors);
   }
 
-  /**
-   * Forget everything about the vault this registry was reconciled against.
-   * MUST be called on every vault switch / disable: this instance is a process
-   * singleton, so a surviving `serverVaultId` + path maps are exactly what let
-   * vault A's server ids be applied to vault B's tree.
-   */
+  /** A retired registry must never be rebound, even by suspended work. */
+  private retired = false;
+
+  /** End this instance permanently. Suspended work can never adopt a new scope. */
+  retire(): void {
+    this.retired = true;
+    this.reset();
+    this.setInboundHost(null);
+    this.setMapListener(null);
+    this.setNoteMetaListener(null);
+    this.setColorListener(null);
+    this.setFailureListener(null);
+    this.setPushedListener(null);
+  }
+
+  /** Clear cached state. Session teardown must use retire(), then a new instance. */
   reset(): void {
     // Synchronously first: a pending flush must never outlive the vault.
     this.checkpoint?.dispose();
@@ -1409,6 +1419,7 @@ export class VaultRegistry {
   /** True when this registry's contents belong to a vault that is no longer the
    *  open one. Bail silently — "the user moved on" is not an error. */
   private stale(): boolean {
+    if (this.retired) return true;
     if (this.bound != null && !this.bound.isCurrent()) return true;
     // A vanished vault root (#221) is the same answer for a different reason:
     // whatever this pass meant to write belongs to a folder that is not there.
@@ -3522,6 +3533,7 @@ export class VaultRegistry {
    * Returns whether anything was adopted.
    */
   async primeLocal(orgId: string): Promise<boolean> {
+    if (this.retired) return false;
     this.bound = this.scopes.current();
     const cfg = await this.loadConfig();
     if (this.stale()) return false;
@@ -3562,6 +3574,7 @@ export class VaultRegistry {
   }
 
   private async reconcileNow(input: ReconcileInput): Promise<{ seeded: boolean }> {
+    if (this.retired) return { seeded: false };
     // Bind this registry to the vault the reconcile is FOR — this is the one
     // operation allowed to (re)claim it. Every await below is a chance for the
     // user to switch vaults; each `stale()` checkpoint drops the rest of the work
@@ -3794,6 +3807,7 @@ export class VaultRegistry {
     // did not say", which is what stops the reconciler inferring a delete — and
     // a server that predates `limit`/`after` ignores them, answers everything
     // with no `nextAfter`, and is therefore asked exactly once.
+    const startedAt = Date.now();
     const p = Promise.all([
       this.api.listFolderRegistry(vaultId),
       this.api.listNoteRegistryPaged(vaultId, { limit: PULL_PAGE_LIMIT }),
@@ -3803,7 +3817,7 @@ export class VaultRegistry {
     p.catch(() => {
       /* surfaced at the await in takeListings */
     });
-    this.prefetchedListings = { vaultId, p };
+    this.prefetchedListings = { vaultId, p, startedAt };
   }
 
   /**
@@ -3867,6 +3881,10 @@ export class VaultRegistry {
     this.failed = [];
     this.limitReached = null;
     this.accountReadOnly = false;
+    // Notes created while a paged listing was in flight are new content, not
+    // permission grants. The cutoff is the request start, never its completion.
+    const listingStartedAt = this.prefetchedListings?.vaultId === vaultId
+      ? this.prefetchedListings.startedAt : Date.now();
     const [folderRegistry, noteRegistry] = await this.takeListings(vaultId);
     if (this.stale()) return false;
     // The empty state of a member who can read nothing yet reads this.
@@ -3946,7 +3964,7 @@ export class VaultRegistry {
     void this.learnFileAuthorship(vaultId);
     // Access GRANTS: notes readable now that were not in the previous pass's
     // listing. Measured against the listing, before anything below maps them.
-    this.detectAccessGrants(serverNotes);
+    this.detectAccessGrants(serverNotes, listingStartedAt);
     // A note listed again is readable again: its "you lost this" report line
     // (kept locally / deleted by a teammate) no longer holds this session.
     reconcileReport.forgetReadable(new Set(serverNotes.map((n) => noteDocId(n))));

@@ -2425,6 +2425,33 @@ describe("offline reconciliation — ready.tombstones", () => {
 });
 
 describe("access grants", () => {
+  it("does not call a note created during a slow listing an access grant", async () => {
+    const clock = vi.spyOn(Date, "now");
+    const started = Date.parse("2026-10-01T10:00:00Z");
+    clock.mockReturnValue(started);
+    try {
+      const disk = new FakeDisk();
+      install(disk);
+      const state: ServerState = { notes: [], tombstones: [] };
+      const api = fakeApi(state);
+      const list = api.listNoteRegistryPaged.bind(api);
+      vi.mocked(api.listNoteRegistryPaged).mockImplementationOnce(async (...args) => {
+        const result = await list(...args);
+        clock.mockReturnValue(started + 30_000);
+        return result;
+      });
+      const reg = new VaultRegistry(api);
+      const grants: unknown[] = [];
+      const host = recordingHost();
+      host.host.accessGranted = (event) => grants.push(event);
+      reg.setInboundHost(host.host);
+      await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+      state.notes = [{ id: "new", rel_path: "new.md", created_at: new Date(started + 10_000).toISOString() } as ServerState["notes"][number]];
+      await reg.pull();
+      expect(grants).toEqual([]);
+    } finally { clock.mockRestore(); }
+  });
+
   it("the first pull fires nothing; a later pull adding two readable notes fires once with count 2", async () => {
     const disk = new FakeDisk();
     disk.notes.set("a.md", "d1");

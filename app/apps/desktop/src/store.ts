@@ -1890,6 +1890,8 @@ function vaultScopedSyncReset() {
     rootFrozen: false,
     // Tabs are paths, and paths only mean something inside the vault that
     // minted them — every vault leave/switch spreads this reset.
+    openNote: null,
+    openingNotePath: null,
     openTabs: [] as string[],
     virtualTabs: [] as VirtualTab[],
     activeVirtualTab: null as string | null,
@@ -1981,7 +1983,6 @@ async function unsyncLocalTeardown(
 export const useStore = create<AppStore>((set, get) => ({
   vault: null,
   tree: null,
-  openNote: null,
   openVirtualTab: (tab) =>
     set((s) => ({ virtualTabs: upsertTab(s.virtualTabs, tab), activeVirtualTab: tab.id, homeActivation: null })),
   activateVirtualTab: (id) => set({ activeVirtualTab: id, homeActivation: null }),
@@ -2077,7 +2078,6 @@ export const useStore = create<AppStore>((set, get) => ({
   },
   landingVault: false,
   switchingVault: null,
-  openingNotePath: null,
   organizations: [],
   members: [],
   pendingInvitations: [],
@@ -2639,7 +2639,7 @@ export const useStore = create<AppStore>((set, get) => ({
     } finally {
       // Only the newest open clears it: two quick clicks would otherwise have the
       // first one's completion cancel the second one's indicator.
-      if (get().openingNotePath === path) set({ openingNotePath: null });
+      if (stillOpening()) set({ openingNotePath: null });
     }
   },
 
@@ -3935,6 +3935,10 @@ export const useStore = create<AppStore>((set, get) => ({
       ) {
         rememberOrgVault(previousOrgId, currentVaultPath);
       }
+
+      // Finish the editor's durable write before changing the vault epoch.
+      await bridgeManager.currentBridge()?.flushEgest();
+      if (superseded()) return;
 
       // Stop syncing the vault we're leaving before anything else. Everything
       // below awaits the network, and one branch swaps the Rust vault slot

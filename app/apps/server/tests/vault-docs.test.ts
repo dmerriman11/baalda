@@ -3,6 +3,7 @@ import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import {
   listDeletedReadableDocsInVault,
   listReadableDocsInVault,
+  listVisibleFolders,
 } from "../src/permissions/vault-docs.js";
 import { effectivePermission } from "../src/permissions/resolver.js";
 import { pool } from "../src/db/pool.js";
@@ -299,5 +300,28 @@ describe("listDeletedReadableDocsInVault", () => {
     expect(await listReadableDocsInVault(owner, vault)).toEqual(new Set([fileId]));
     // ...but can never be a tombstone, so the client can't be told to delete it.
     expect(await listDeletedReadableDocsInVault(owner, vault)).toEqual(new Set());
+  });
+});
+
+
+describe("restricted folder visibility", () => {
+  beforeEach(resetDb);
+
+  it("shows the path to a personally shared note without exposing its siblings", async () => {
+    const org = await seedOrg("Private paths", "private-paths");
+    const user = await seedUser("reader@paths.test");
+    await seedMember(org, user, "member");
+    const vault = await seedVault(org);
+    await seedVaultShare(org, "org", org, "edit");
+    const parent = await seedFolder(vault, null, "Finance", "Finance");
+    const child = await seedFolder(vault, parent, "Budgets", "Finance/Budgets");
+    const sibling = await seedFolder(vault, parent, "Payroll", "Finance/Payroll");
+    const note = await seedNote(vault, child, "Finance/Budgets/plan.md");
+    const secret = await seedNote(vault, sibling, "Finance/Payroll/salaries.md");
+    await seedItemPrivate(org, "folder", parent);
+    await seedShare(org, "file", note, user, "view");
+    expect((await listVisibleFolders(user, vault)).map(f => f.id).sort()).toEqual([parent, child].sort());
+    expect(await listReadableDocsInVault(user, vault)).toEqual(new Set([note]));
+    expect(await effectivePermission(user, secret)).toBe("none");
   });
 });

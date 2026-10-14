@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { pool } from "../db/pool.js";
 import { orgRole, resolveResource } from "../permissions/lookup.js";
 import { createResolverCache, effectivePermission, type Permission } from "../permissions/resolver.js";
-import { listReadableDocsInVault, vaultAccess } from "../permissions/vault-docs.js";
+import { listReadableDocsInVault, listVisibleFolders, vaultAccess } from "../permissions/vault-docs.js";
 import {
   canEditFolder,
   canReadAttachment,
@@ -280,15 +280,7 @@ export async function listVaults(ctx: McpContext) {
 
 export async function listFolders(ctx: McpContext, vaultId: string) {
   await requireVaultInScope(ctx.auth, vaultId);
-  const { rows } = await pool.query<{
-    id: string;
-    parent_id: string | null;
-    name: string;
-    path: string;
-  }>(
-    "SELECT id, parent_id, name, path FROM folders WHERE vault_id = $1 ORDER BY path",
-    [vaultId],
-  );
+  const rows = await listVisibleFolders(ctx.auth.userId, vaultId);
   return rows.map((r) => ({
     folderId: r.id,
     parentId: r.parent_id,

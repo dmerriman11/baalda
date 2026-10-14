@@ -100,11 +100,17 @@ function pathKeyOf(p: string): string {
  * by the server path. Empty off Windows-unsafe names, so the check is free.
  */
 export function strippedServerIndex(serverPaths: Iterable<string>): Map<string, string> {
+  const all = [...serverPaths];
+  // A stripped spelling the server ALSO holds as a real item (`X.` beside `X`)
+  // is that item's own path: a local `X/new.md` under it is new work, not a twin.
+  const real = new Set(all.map(pathKeyOf));
   const out = new Map<string, string>();
-  for (const p of serverPaths) {
+  for (const p of all) {
     const stripped = windowsStrip(p);
     if (stripped === p) continue;
-    out.set(pathKeyOf(stripped), p);
+    const key = pathKeyOf(stripped);
+    if (real.has(key)) continue;
+    out.set(key, p);
   }
   return out;
 }

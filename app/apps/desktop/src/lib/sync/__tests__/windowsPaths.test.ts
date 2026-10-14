@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import { UnmaterializablePaths, applySkippingUnsafe, windowsPathProblem, windowsStrip } from "../windowsPaths";
+import {
+  UnmaterializablePaths,
+  applySkippingUnsafe,
+  strippedServerIndex,
+  windowsPathProblem,
+  windowsStrip,
+} from "../windowsPaths";
 
 describe("windowsPathProblem", () => {
   it("flags names Windows cannot hold", () => {
@@ -68,5 +74,26 @@ describe("applySkippingUnsafe", () => {
     const out = await applySkippingUnsafe(entries, apply, new UnmaterializablePaths(() => false));
     expect(apply).toHaveBeenCalledWith(entries);
     expect(out.map((o) => o.status)).toEqual(["written", "written"]);
+  });
+});
+
+describe("skipShadow", () => {
+  it("matches the stripped twin case-insensitively and in NFC, only on Windows", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const index = strippedServerIndex(["Caf\u00e9.", "Caf\u00e9./a.md", "Team"]);
+    const win = new UnmaterializablePaths(() => true);
+    expect(win.skipShadow("CAFE\u0301", index)).toBe(true);
+    expect(win.skipShadow("cafe\u0301/new.md", index)).toBe(true);
+    expect(win.skipShadow("Team/new.md", index)).toBe(false);
+    expect(win.skipShadow("Cafes", index)).toBe(false);
+    expect(new UnmaterializablePaths(() => false).skipShadow("Caf\u00e9", index)).toBe(false);
+    warn.mockRestore();
+  });
+
+  it("never blocks new work under a real server item that shares the stripped spelling", () => {
+    const index = strippedServerIndex(["X.", "X"]);
+    const win = new UnmaterializablePaths(() => true);
+    expect(index.size).toBe(0);
+    expect(win.skipShadow("X/new.md", index)).toBe(false);
   });
 });

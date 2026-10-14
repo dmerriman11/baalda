@@ -300,7 +300,9 @@ async function listDocsInVault(
     : `UNION
      SELECT fi.id FROM files fi
        WHERE fi.vault_id = $2
-         AND (fi.folder_id IN (SELECT id FROM subtree) OR fi.id IN (SELECT id FROM shared_files)
+         AND (($4 AND $6 AND fi.created_by = $1
+               AND NOT EXISTS (SELECT 1 FROM notes n WHERE n.id = fi.id AND n.deleted_at IS NULL))
+              OR fi.folder_id IN (SELECT id FROM subtree) OR fi.id IN (SELECT id FROM shared_files)
               OR EXISTS (SELECT 1 FROM user_vault_grant))`;
   // Deleting a folder HARD-deletes its rows (`tree-ops.ts deleteFolder`) after
   // soft-deleting the notes inside, and `notes.folder_id` is `ON DELETE SET

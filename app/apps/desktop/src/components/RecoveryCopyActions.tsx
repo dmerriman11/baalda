@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import * as ipc from "../lib/ipc";
 import { useStore } from "../store";
 import { noteLabel } from "../lib/notePath";
+import { isNoteExt } from "../lib/formats";
 import { AsyncButton } from "./AsyncButton";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { RowActionsMenu, type RowAction } from "./RowActionsMenu";
@@ -63,7 +64,8 @@ export function RecoveryCopyActions({
   const [restoredTo, setRestoredTo] = useState<string | null>(null);
   // A read-only note refuses the edit itself (liveEditorViews), with its own
   // message, so write access is not second-guessed here.
-  const avail = copyActions({ hasCopy: true, liveNoteExists: exists === true, canWrite: true });
+  const binary = !isNoteExt(copy.relPath);
+  const avail = copyActions({ hasCopy: true, liveNoteExists: exists === true, canWrite: !binary });
 
   const run = async (fn: () => Promise<unknown>) => {
     setError(null);
@@ -123,9 +125,9 @@ export function RecoveryCopyActions({
     <>
       <span className="health-missing-actions">
         <button type="button" className="ghost-pill sm" onClick={() => openCopy(copy, modified)}>
-          Open copy
+          {binary ? ipc.revealLabel() : "Open copy"}
         </button>
-        <RowActionsMenu actions={restoreActions} ariaLabel="Restore or delete this copy" />
+        <RowActionsMenu actions={restoreActions} ariaLabel={binary ? "Recovery copy actions" : "Restore or delete this copy"} />
       </span>
       {error && (
         <p role="alert" className="auth-error health-missing-error">
@@ -140,7 +142,7 @@ export function RecoveryCopyActions({
           onConfirm={doDelete}
           onCancel={() => setConfirm(null)}
         >
-          The copy in .context/trash is removed from this device. The current note is not
+          The copy in .context/trash is removed from this device. The current file is not
           changed.
         </ConfirmDialog>
       )}

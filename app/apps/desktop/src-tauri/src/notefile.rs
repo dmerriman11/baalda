@@ -1011,8 +1011,7 @@ mod tests {
 
     // ---- trash / ensure_folder --------------------------------------------
     //
-    // `trash_note` remains as a legacy recovery primitive. Its path guards stay
-    // pinned even though confirmed sync removals now use `delete_file`.
+    // `trash_note` is also the atomic recovery move for revoked attachments.
 
     #[test]
     fn trash_moves_the_note_into_context_and_leaves_no_source() {
@@ -1026,6 +1025,20 @@ mod tests {
         // stops a trashed note being re-registered as a ghost).
         let moved = std::fs::read_to_string(tmp.path().join(dest)).unwrap();
         assert_eq!(moved, "real content");
+    }
+
+    #[test]
+    fn trash_preserves_binary_bytes_and_disambiguates_repeated_revocations() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bytes = [0u8, 255, 128, 10, 0, 42];
+        std::fs::write(tmp.path().join("report.pdf"), bytes).unwrap();
+        let first = trash_note(tmp.path(), "report.pdf", "s1").unwrap();
+        std::fs::write(tmp.path().join("report.pdf"), [1u8, 2]).unwrap();
+        let second = trash_note(tmp.path(), "report.pdf", "s1").unwrap();
+        assert_ne!(first, second);
+        assert_eq!(std::fs::read(tmp.path().join(first)).unwrap(), bytes);
+        assert_eq!(std::fs::read(tmp.path().join(second)).unwrap(), [1u8, 2]);
+        assert!(!tmp.path().join("report.pdf").exists());
     }
 
     #[test]

@@ -498,7 +498,7 @@ export interface InboundHost {
    *
    * The binary equivalent of {@link noteRemoved}, and deliberately a separate
    * hook — there is no doc to release, no CRDT to clear and no editor to close.
-   * `trashedTo` is retained for host compatibility; confirmed removals pass null.
+   * `trashedTo` names the recovery copy; null means the source was already absent.
    */
   fileRemoved?(docId: string, path: string, trashedTo: string | null): void;
   /**
@@ -2366,8 +2366,9 @@ export class VaultRegistry {
    *    told this removal was ours, or it propagates it back as a user delete and
    *    the owner loses their copy of a file they only meant to stop sharing.
    *
-   * `deleteFile` works on any bytes and refuses a directory and an ignored path,
-   * so it needs no binary twin in Rust.
+   * Keep the exact local bytes in recovery storage: confirmation only proves
+   * an earlier upload, and a wrong server revocation must not destroy work.
+   * `trashNote` atomically moves any file, including binaries.
    */
   private async removeRevokedBinary(gone: InboundTrash): Promise<boolean> {
     // The one refusal, and the same shape the note rail's `isPushed` makes: the
@@ -2389,16 +2390,30 @@ export class VaultRegistry {
     // BEFORE the removal, so the claim beats the watcher to the queue.
     this.host?.suppressBinaryDelete?.(gone.path);
     try {
-      // Idempotent when the source already disappeared in the same watcher
-      // window, so the mapping can still be retired cleanly.
-      await ipc.deleteFile(gone.path, this.epoch());
+      let trashedTo: string | null;
+      try {
+        trashedTo = await ipc.trashNote(gone.path, recoveryStamp(), this.epoch());
+      } catch (e) {
+        if (ipc.isVaultMismatch(e) || this.stale()) return false;
+        // A confirmed absence is idempotent. Any other failure keeps the file
+        // and its identity for retry; never fall back to hard deletion.
+        if (await ipc.binaryExists(gone.path, this.epoch())) throw e;
+        trashedTo = null;
+      }
+      if (this.stale()) return false;
       // The row is gone for us, so the mapping goes with it — otherwise the next
       // `hello` re-announces an id whose file is not here, the server names it
       // revoked again, and the ACL-authority clock is re-stamped on every
       // reconnect for a removal that already happened.
       this.forgetFileId(gone.path);
       this.authoredDocs.delete(gone.docId);
-      this.host?.fileRemoved?.(gone.docId, gone.path, null);
+      this.host?.fileRemoved?.(gone.docId, gone.path, trashedTo);
+      if (trashedTo) reconcileReport.record({
+        kind: this.isSelfRevocation(gone.docId, gone.path) ? "selfRevoked" : "keptLocally",
+        docId: gone.docId,
+        path: gone.path,
+        detail: trashedTo,
+      });
       return true;
     } catch (e) {
       if (ipc.isVaultMismatch(e)) return false;

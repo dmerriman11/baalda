@@ -102,8 +102,8 @@ export interface InboundInput {
    * folder worked, because a folder is a small enough slice to fit.
    *
    * Nothing else is relaxed. Deletions and renames keep their caps (a wrong
-   * delete destroys work; a wrong revoke does not — the server holds every byte
-   * of a revoked doc by definition, and the executor still refuses any doc whose
+   * delete destroys work; revoked binaries retain a local recovery copy,
+   * and the executor still refuses any doc whose
    * content this device never confirmed upstream).
    */
   authoritative?: boolean;
@@ -682,7 +682,8 @@ export function planInbound(input: InboundInput): InboundPlan {
   // A `.pdf` set to Private used to be the one thing in the vault whose access
   // could be enforced everywhere except on the disk of the person who lost it:
   // the note above leaves, the file stays, readable forever in any viewer. It
-  // leaves now, by a deliberately NARROWER route than a note's.
+  // leaves the active tree now, by a deliberately NARROWER route than a note's.
+  // The executor moves it to local recovery storage, never hard-deletes it.
   //
   // A note may be removed on listing-absence alone (inside the cap): `GET
   // /api/notes` not naming it is a positive statement, taken at a different

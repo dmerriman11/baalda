@@ -21,6 +21,7 @@
 //   • honest — a per-item failure is retried with backoff and then RECORDED
 //     (`failures()`), so a vault with failures can never report fully synced.
 
+import { UnmaterializablePaths } from "./windowsPaths";
 import { markAccessTreeStale } from "../accessTreeStale";
 import {
   ACCESS_CHECK_MAX,
@@ -1089,6 +1090,14 @@ export class VaultRegistry {
    * first event that arrives for it.
    */
   private materialized = new Set<string>();
+  /**
+   * Server paths this OS cannot hold as spelled (Windows: trailing dot/space,
+   * reserved device names, forbidden characters, MAX_PATH). Skipped by the
+   * inbound folder and materialize steps with one warning per path per session,
+   * never retried: creating them either fails on every pull or lands under a
+   * stripped name the watcher reports back as a new folder (`windowsPaths.ts`).
+   */
+  unmaterializable = new UnmaterializablePaths();
   /**
    * Paths the same-path conflict step ({@link resolveSamePathConflicts}) just
    * moved a local file away from or onto, with the time it did so.
@@ -2643,6 +2652,7 @@ export class VaultRegistry {
       // a NEW folder once the own-delete window closed: deleted folders came back
       // empty, for the whole team.
       if (this.isOwnDelete(path)) continue;
+      if (this.unmaterializable.skip(path)) continue;
       try {
         // Only a directory this call actually created is a disk change — and it
         // is OUR change, so its watcher echo is remembered and consumed rather
@@ -4608,6 +4618,8 @@ export class VaultRegistry {
       // just deleted in-app must not come back as a placeholder, which would
       // also re-create its deleted parent folders on disk.
       if (this.isOwnDelete(rp)) return false;
+      // A name this OS cannot hold (Windows): never a placeholder, never a retry.
+      if (this.unmaterializable.skip(rp)) return false;
       if (held && held.size > 0) {
         const docId = this.byPath.get(rp)?.docId;
         if (docId && held.has(docId)) return false;

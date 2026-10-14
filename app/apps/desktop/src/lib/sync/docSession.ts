@@ -284,6 +284,29 @@ const GAP_DELAYED_PULL_REASONS: ReadonlySet<RegistryPullReason> = new Set<Regist
 ]);
 
 /**
+ * The idle-pull brake (defence in depth against a client-local loop). After
+ * {@link REGISTRY_PULL_BRAKE_AFTER} consecutive pulls that changed nothing, a
+ * locally-caused re-arm (watcher, reauth, a retry) waits 2 s → 4 s → … → 30 s
+ * after the last pull ended instead of 250ms. A watcher request waits at most
+ * 2 s so a real new local file still registers promptly. Teammate frames and
+ * user actions are not braked; any pull that changes something releases it.
+ */
+export const REGISTRY_PULL_BRAKE_AFTER = 3;
+export const REGISTRY_PULL_BRAKE_MAX_MS = 30_000;
+const REGISTRY_PULL_BRAKE_BASE_MS = 2_000;
+const BRAKED_PULL_REASONS: ReadonlySet<RegistryPullReason> = new Set<RegistryPullReason>([
+  "watcher",
+  "reauth",
+  "register-failed",
+]);
+const USER_PULL_REASONS: ReadonlySet<RegistryPullReason> = new Set<RegistryPullReason>([
+  "delete-restore",
+  "delete-confirmed",
+  "revert",
+  "shared-navigation",
+]);
+
+/**
  * Consecutive failed registry pulls before Health and the pill say so. The pull
  * is the only path that registers a NEW note or folder; content edits ride
  * their own sockets, so a pull that keeps failing used to look like "edits sync,
@@ -548,6 +571,9 @@ export class SyncManager implements InboundHost {
   /** A frame-driven pull asked for while one was running: armed (with the
    *  gap) the moment the running pull ends. */
   private registryPullTrailing = false;
+  /** Consecutive completed pulls that changed nothing (the idle-pull brake). */
+  private registryPullIdleStreak = 0;
+  private registryPullBrakeLogged = false;
   /** The deferred meta-only pull, if one is waiting. At most one. */
   private metaPullTimer: ReturnType<typeof setTimeout> | null = null;
   /** UI subscribes here to refetch the Activity feed when the server says the
@@ -1602,6 +1628,12 @@ export class SyncManager implements InboundHost {
    * {@link handleRegistryChanged} so the trailing pull a running one owes can
    * re-arm without repeating that method's side effects and log line.
    */
+  /** A pull, teammate change or user action changed something: full speed again. */
+  private releasePullBrake(): void {
+    this.registryPullIdleStreak = 0;
+    this.registryPullBrakeLogged = false;
+  }
+
   private armRegistryPull(reason: RegistryPullReason): void {
     // A signal that arrives once sync is down (or for the vault we just left) must
     // not even ARM the timer — an armed timer is the thing that outlived the switch
@@ -1613,9 +1645,23 @@ export class SyncManager implements InboundHost {
     const gapDelayed = GAP_DELAYED_PULL_REASONS.has(reason);
     // A teammate's frame waits until the last pull ended at least
     // REGISTRY_FRAME_PULL_MIN_GAP_MS ago; everything else keeps the 250ms path.
-    const delay = gapDelayed
+    let delay = gapDelayed
       ? Math.max(250, this.registryPullEndedAt + REGISTRY_FRAME_PULL_MIN_GAP_MS - now)
       : 250;
+    if (USER_PULL_REASONS.has(reason)) this.releasePullBrake();
+    const idle = this.registryPullIdleStreak;
+    if (BRAKED_PULL_REASONS.has(reason) && idle >= REGISTRY_PULL_BRAKE_AFTER) {
+      let wait = Math.min(
+        REGISTRY_PULL_BRAKE_MAX_MS,
+        REGISTRY_PULL_BRAKE_BASE_MS * 2 ** Math.min(idle - REGISTRY_PULL_BRAKE_AFTER, 8),
+      );
+      if (reason === "watcher") wait = Math.min(wait, REGISTRY_PULL_BRAKE_BASE_MS);
+      delay = Math.max(delay, this.registryPullEndedAt + wait - now);
+      if (!this.registryPullBrakeLogged) {
+        this.registryPullBrakeLogged = true;
+        console.warn(`[sync] ${idle} registry pulls in a row changed nothing; slowing ${reason} pulls`);
+      }
+    }
     const dueAt = now + delay;
     if (this.registryPullTimer) {
       // Already armed. Re-arming is the coalescing, but only up to a point: past
@@ -1680,6 +1726,8 @@ export class SyncManager implements InboundHost {
           // other half is the channel reaching `synced`). Until both hold, a
           // missing file is a disk that isn't ready, not a delete.
           this.pulledOnce = true;
+          if (changed) this.releasePullBrake();
+          else this.registryPullIdleStreak++;
           this.markLive();
           this.maybeNoticeClosedChanges();
           // Only poke the sidebar when the pull actually changed something it
@@ -6294,6 +6342,7 @@ export class SyncManager implements InboundHost {
     this.registryPullGapOnly = false;
     this.registryPullsInFlight = 0;
     this.registryPullEndedAt = 0;
+    this.releasePullBrake();
     this.registryPullTrailing = false;
     if (this.metaPullTimer) {
       clearTimeout(this.metaPullTimer);

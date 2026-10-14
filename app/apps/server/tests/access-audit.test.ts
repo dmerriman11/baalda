@@ -93,3 +93,25 @@ it("attributes Better Auth removal to the caller, not the removed user", async (
   expect(history.events.find(e => e.entityId === memberId && e.action === "delete"))
     .toMatchObject({ actorUserId: owner.userId, before: { userId: target.userId } });
 });
+
+it("Better Auth's own role endpoint stays refused and leaves no unattributed role event", async () => {
+  const owner = await signUp("role-owner@audit.test");
+  const target = await signUp("role-target@audit.test");
+  const org = await createOrg(owner, "Role", "audit-role");
+  const memberId = await seedMember(org.id, target.userId, "member");
+  await pool.query("DELETE FROM access_audit");
+  const response = await app.fetch(new Request("http://local/api/auth/organization/update-member-role", {
+    method: "POST", headers: authHeaders(owner),
+    body: JSON.stringify({ organizationId: org.id, memberId, role: "admin" }),
+  }));
+  expect(response.status).toBe(403);
+  expect((await pool.query('SELECT role FROM member WHERE id=$1', [memberId])).rows[0].role).toBe("member");
+  expect((await listAccessAudit(org.id, owner.userId)).events.filter(e => e.entityId === memberId)).toEqual([]);
+  // The server's PATCH route is the supported path, and it is attributed.
+  const patch = await app.fetch(new Request(`http://local/api/orgs/${org.id}/members/${target.userId}`, {
+    method: "PATCH", headers: authHeaders(owner), body: JSON.stringify({ role: "admin" }),
+  }));
+  expect(patch.status).toBe(200);
+  expect((await listAccessAudit(org.id, owner.userId)).events.find(e => e.entityId === memberId && e.action === "update"))
+    .toMatchObject({ actorUserId: owner.userId, before: { role: "member" }, after: { role: "admin" } });
+});

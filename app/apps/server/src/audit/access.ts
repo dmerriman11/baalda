@@ -35,7 +35,7 @@ export async function withAuditActor<T>(
 /** Better Auth owns its transaction. The trigger already recorded the change;
  * enrich that specific membership event with the authenticated request actor.
  * A crash before the hook leaves an honest null actor, never loses the event. */
-export async function attributeMembershipEvent(memberId: string, action: "insert" | "delete", userId: string | null): Promise<void> {
+export async function attributeMembershipEvent(memberId: string, action: "insert" | "update" | "delete", userId: string | null): Promise<void> {
   if (!userId) return;
   try {
     await pool.query(

@@ -419,6 +419,11 @@ export const auth = betterAuth({
             message: "role_change_not_supported_here",
           });
         },
+        // Unreachable while the refusal above stands; if it is ever lifted, the
+        // role change is still credited to the request's caller, not left null.
+        afterUpdateMemberRole: async ({ member }) => {
+          await attributeMembershipEvent(member.id, "update", auditRequestActor.getStore() ?? null);
+        },
       },
     }),
     // OAuth 2.1 authorization server for MCP clients (spec: MCP integration).

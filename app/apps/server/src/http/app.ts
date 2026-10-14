@@ -323,8 +323,10 @@ export function createApp(deps: AppDeps): Hono {
     const response = await auditRequestActor.run(session?.userId ?? null, () => auth.handler(c.req.raw));
     // Better Auth's leave endpoint bypasses its afterRemoveMember hook.
     if (session && response.ok && c.req.path === "/api/auth/organization/leave") {
-      const member = await response.clone().json() as { id?: string };
-      if (member.id) await attributeMembershipEvent(member.id, "delete", session.userId);
+      // Attribution is best-effort: an unreadable body must never turn a
+      // completed leave into a 500. The event keeps its honest null actor.
+      const member = await response.clone().json().catch(() => null) as { id?: string } | null;
+      if (member?.id) await attributeMembershipEvent(member.id, "delete", session.userId);
     }
     return response;
   });

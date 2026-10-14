@@ -250,6 +250,8 @@ export interface AttachmentMeta {
   relPath: string;
   size: number;
   sha256: string;
+  /** Last-modified time, Unix ms (the upload quiet period reads it). */
+  modifiedMs?: number;
 }
 
 /** Half-open byte range `[start, end)` — one multipart part of a file. */
@@ -976,6 +978,10 @@ export const uploadAttachment = (
     method?: string;
     headers?: Record<string, string>;
     range?: ByteRange;
+    /** Fail with "file changed during upload" unless the streamed bytes hash
+     *  to this (whole-file PUTs only) and the file is `expectedSize` bytes. */
+    expectedSha256?: string;
+    expectedSize?: number;
   },
   expectedEpoch?: VaultEpoch,
 ) =>
@@ -985,6 +991,8 @@ export const uploadAttachment = (
     method: input.method ?? "PUT",
     headers: input.headers ?? {},
     range: input.range ?? null,
+    expectedSha256: input.expectedSha256 ?? null,
+    expectedSize: input.expectedSize ?? null,
     expectedEpoch: expectedEpoch ?? null,
   });
 

@@ -3026,18 +3026,37 @@ pub async fn upload_attachment(
     method: Option<String>,
     headers: Option<HashMap<String, String>>,
     range: Option<attachments::ByteRange>,
+    expected_sha256: Option<String>,
+    expected_size: Option<u64>,
     expected_epoch: Option<u64>,
 ) -> AppResult<attachments::UploadOutcome> {
-    let (vault, _) = require_vault_at(&state, expected_epoch)?;
-    attachments::upload_file(
+    let (vault, index) = require_vault_at(&state, expected_epoch)?;
+    let out = attachments::upload_file(
         &vault,
         &rel_path,
         &url,
         method.as_deref().unwrap_or("PUT"),
         &headers.unwrap_or_default(),
         range,
+        expected_sha256.as_deref(),
+        expected_size,
     )
-    .await
+    .await;
+    // The bytes moved under us: forget this path's cached sha so the next
+    // pass re-reads the file instead of trusting a `(size, mtime)` hit.
+    if let Err(e) = &out {
+        if e.to_string().starts_with(attachments::CHANGED_DURING_UPLOAD) {
+            let guard = index.lock().unwrap();
+            if let Ok(mut cache) = guard.attachment_hash_cache() {
+                if cache.remove(&rel_path).is_some() {
+                    if let Err(e) = guard.save_attachment_hash_cache(&cache) {
+                        log::warn!("[attachments] hash cache prune failed: {e}");
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Stream a URL into `attachments/<…>`, verifying the sha256 before the rename.

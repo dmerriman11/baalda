@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import {
   EMBED_REFUSAL_RETRY_MS,
   AttachmentSync,
+  CHANGED_DURING_UPLOAD,
+  UPLOAD_QUIET_MS,
   diffAttachments,
   isSafeAttachmentRelPath,
   mimeForPath,
@@ -1331,6 +1333,83 @@ describe("explicit missing-file recovery", () => {
     await expect(new AttachmentSync({ ...deps, deleteFile }).removeMissingFile("a.pdf", "a"))
       .rejects.toThrow("No write access");
     expect(deleteFile).toHaveBeenCalledWith("a");
+  });
+});
+
+describe("bytes that change between the hash and the PUT", () => {
+  const PNG = "Media/chart.png";
+
+  it("a changed-during-upload PUT is never completed, records nothing, and the next pass rehashes and uploads", async () => {
+    let pass = 0;
+    const bases: Array<[string, string]> = [];
+    const remembered: string[] = [];
+    const putArgs: Array<{ expectedSha256?: string; expectedSize?: number }> = [];
+    const { deps, log } = makeTransport([{ relPath: PNG, bytes: new Uint8Array([1, 2, 3]) }], () => SINGLE_INTENT, {
+      filesWithBytes: async () => true,
+      localFileIds: async () => new Map([[PNG, "local-png"]]),
+      knownFileId: () => null,
+      registerFile: async ({ id }) => id,
+      rememberFileId: (relPath, id) => void remembered.push(`${relPath}=${id}`),
+      setFileBase: (docId, sha) => void bases.push([docId, sha]),
+    });
+    // The hash pass: the first saw a half-written file, the second the final one.
+    deps.listLocal = async () => [
+      { relPath: PNG, sha256: pass === 0 ? "sha-partial" : "sha-final", size: 3 },
+    ];
+    deps.putFile = async (input) => {
+      putArgs.push({ expectedSha256: input.expectedSha256, expectedSize: input.expectedSize });
+      if (pass === 0) {
+        throw new Error(`${CHANGED_DURING_UPLOAD}: ${PNG}: streamed sha256 abc, intent declared sha-partial`);
+      }
+      log.puts.push({ url: input.url, method: input.method, headers: input.headers, bytes: 3, via: "rust" });
+      return { status: 200, etag: null };
+    };
+    deps.completeUpload = async (url, body) => {
+      log.completes.push({ url, body });
+      return { file: { id: "local-png", docId: "local-png", folderId: null, path: PNG, status: "created" } };
+    };
+    const states: string[] = [];
+    deps.onFileStates = (m) => {
+      const st = m[PNG];
+      if (st) states.push(st);
+    };
+    const sync = new AttachmentSync(deps);
+
+    const first = await sync.reconcile();
+    expect(first.uploaded).toBe(0);
+    expect(putArgs[0]).toEqual({ expectedSha256: "sha-partial", expectedSize: 3 });
+    expect(log.completes).toEqual([]);
+    expect(bases).toEqual([]);
+    expect(remembered).toEqual([]);
+    expect(states).not.toContain("error");
+    expect(states[states.length - 1]).toBe("queued");
+
+    pass = 1;
+    const second = await sync.reconcile();
+    expect(second.uploaded).toBe(1);
+    expect(log.intents.map((i) => i.sha256)).toEqual(["sha-partial", "sha-final"]);
+    expect(putArgs[1]).toEqual({ expectedSha256: "sha-final", expectedSize: 3 });
+    expect(log.completes).toHaveLength(1);
+    expect(remembered).toEqual([`${PNG}=local-png`]);
+    sync.stop();
+  });
+
+  it("a file modified inside the quiet period is held back without an intent", async () => {
+    const { deps, log } = makeTransport([{ relPath: PNG, bytes: new Uint8Array([1]) }], () => SINGLE_INTENT);
+    deps.listLocal = async () => [{ relPath: PNG, sha256: "sha-now", size: 1, modifiedMs: Date.now() }];
+    const sync = new AttachmentSync(deps);
+    const res = await sync.reconcile();
+    expect(res.uploaded).toBe(0);
+    expect(log.intents).toEqual([]);
+    expect(log.puts).toEqual([]);
+
+    // Settled: the same file goes on the next pass.
+    deps.listLocal = async () => [
+      { relPath: PNG, sha256: "sha-now", size: 1, modifiedMs: Date.now() - UPLOAD_QUIET_MS - 1 },
+    ];
+    expect((await sync.reconcile()).uploaded).toBe(1);
+    expect(log.intents).toHaveLength(1);
+    sync.stop();
   });
 });
 

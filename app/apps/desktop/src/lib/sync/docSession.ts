@@ -7103,6 +7103,8 @@ export class SyncManager implements InboundHost {
             method: input.method,
             headers: input.headers,
             range: input.range,
+            expectedSha256: input.expectedSha256,
+            expectedSize: input.expectedSize,
           },
           epoch,
         ),

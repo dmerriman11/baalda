@@ -1,5 +1,10 @@
 -- Access history is separate from current shares: removing a member or grant
 -- must not erase the evidence. No note content, tokens or credentials are logged.
+-- The triggers below need brief locks on busy `shares` and `member`; give up
+-- (and fail the deploy, which retries) rather than queue every read behind a
+-- long-running query.
+SET LOCAL lock_timeout = '10s';
+
 CREATE TABLE access_audit (
   id BIGSERIAL PRIMARY KEY,
   organization_id TEXT NOT NULL REFERENCES organization(id) ON DELETE CASCADE,

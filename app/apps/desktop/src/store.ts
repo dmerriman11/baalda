@@ -1742,6 +1742,42 @@ function probeFolderSync(
  * opened. `disable()` aborts the vault scope, clears every timer it owns, and
  * resets the registry's in-memory maps + serverVaultId.
  */
+/**
+ * `setServerUrl` could not adopt the new address (the config/keychain write
+ * failed, or the new server's session check threw). Put the client back on the
+ * previous server and re-hydrate it, so the user is not left signed in with no
+ * vault and empty vault lists until a reload.
+ */
+async function recoverFromFailedServerSwitch(
+  get: () => AppStore,
+  set: (partial: Partial<AppStore>) => void,
+  previousUrl: string,
+  wasSyncing: boolean,
+): Promise<void> {
+  let session = get().session;
+  if (normalizeServerUrl(authManager.getServerUrl()) !== normalizeServerUrl(previousUrl)) {
+    // The client moved before failing: point it back at the old server.
+    try {
+      session = await authManager.setServerUrl(previousUrl);
+    } catch (err) {
+      console.warn("[auth] could not restore the previous server", err);
+      session = null;
+    }
+  }
+  set({
+    serverUrl: authManager.getServerUrl(),
+    session,
+    authStatus: session ? "signed-in" : "signed-out",
+  });
+  if (!session) return;
+  try {
+    await get().refreshVault();
+    if (wasSyncing) await get().enableSyncForVault();
+  } catch (err) {
+    console.warn("[auth] could not re-hydrate the previous server", err);
+  }
+}
+
 function leaveVaultSync(): void {
   syncManager.disable();
 }
@@ -3475,22 +3511,36 @@ export const useStore = create<AppStore>((set, get) => ({
     // This flow owns the session from here: a detached `initAuth` still
     // restoring the previous one must not land its state on top of ours.
     const gen = ++authInitGen;
-    const switching = normalizeServerUrl(url) !== normalizeServerUrl(get().serverUrl);
+    const previousUrl = get().serverUrl;
+    const switching = normalizeServerUrl(url) !== normalizeServerUrl(previousUrl);
     // Persist pending edits before closing the old vault. A failed flush aborts
     // the switch so the editor still owns the unsaved buffer.
     await bridgeManager.currentBridge()?.flushEgest();
     if (authInitGen !== gen) return;
+    const wasSyncing = get().syncEnabled;
+    // Stop syncing with the old server before the address changes. The folder
+    // itself stays open until the new address is adopted, so a switch that
+    // fails (the address could not be saved) falls back to it intact.
+    leaveVaultSync();
+    set({ syncEnabled: false });
+    let session: SessionInfo | null;
+    try {
+      // Clears the old bearer before exposing the new base URL.
+      session = await authManager.setServerUrl(url);
+    } catch (e) {
+      if (authInitGen === gen) await recoverFromFailedServerSwitch(get, set, previousUrl, wasSyncing);
+      throw e;
+    }
     if (switching) {
+      // The client now talks to the new server: the old folder and its
+      // vault/billing state belong to the previous one, even if another flow
+      // has taken over the session meanwhile.
       get().closeLocalVault();
       set({
         organizations: [], members: [], pendingInvitations: [], userInvitations: [],
         billingConfig: null, orgBilling: null, myBilling: null,
       });
-    } else {
-      leaveVaultSync();
-      set({ syncEnabled: false });
     }
-    const session = await authManager.setServerUrl(url);
     if (authInitGen !== gen) return;
     set({
       serverUrl: authManager.getServerUrl(),

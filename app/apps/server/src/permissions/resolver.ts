@@ -368,7 +368,7 @@ export interface AccessIndex {
   folders: Map<string, { parentId: string | null; vaultId: string; createdAt: Date }>;
   /** Live notes (deleted ones are absent, as `locateDoc` never sees them). */
   notes: Map<string, { vaultId: string; folderId: string | null; createdBy: string | null; createdAt: Date }>;
-  files: Map<string, { vaultId: string; folderId: string | null; createdAt: Date }>;
+  files: Map<string, { vaultId: string; folderId: string | null; createdBy: string | null; createdAt: Date }>;
 }
 
 const shareKey = (type: string, id: string) => `${type}\u0000${id}`;
@@ -387,8 +387,8 @@ export async function loadAccessIndex(db: Queryable, organizationId: string): Pr
         WHERE v.organization_id = $1 AND n.deleted_at IS NULL`,
       [organizationId],
     ),
-    db.query<{ id: string; folder_id: string | null; vault_id: string; created_at: Date }>(
-      `SELECT fi.id, fi.folder_id, fi.vault_id, fi.created_at
+    db.query<{ id: string; folder_id: string | null; vault_id: string; created_by: string | null; created_at: Date }>(
+      `SELECT fi.id, fi.folder_id, fi.vault_id, fi.created_by, fi.created_at
          FROM files fi JOIN vaults v ON v.id = fi.vault_id
         WHERE v.organization_id = $1`,
       [organizationId],
@@ -417,7 +417,7 @@ export async function loadAccessIndex(db: Queryable, organizationId: string): Pr
     shares: new Map(),
     folders: new Map(folders.rows.map((r) => [r.id, { parentId: r.parent_id, vaultId: r.vault_id, createdAt: r.created_at }])),
     notes: new Map(notes.rows.map((r) => [r.id, { vaultId: r.vault_id, folderId: r.folder_id, createdBy: r.created_by, createdAt: r.created_at }])),
-    files: new Map(files.rows.map((r) => [r.id, { vaultId: r.vault_id, folderId: r.folder_id, createdAt: r.created_at }])),
+    files: new Map(files.rows.map((r) => [r.id, { vaultId: r.vault_id, folderId: r.folder_id, createdBy: r.created_by, createdAt: r.created_at }])),
   };
   for (const row of shares.rows) {
     const key = shareKey(row.resource_type, row.resource_id);
@@ -676,7 +676,7 @@ async function prefetchDocs(db: Queryable, docIds: string[]): Promise<Map<string
        FROM notes n JOIN vaults v ON v.id = n.vault_id
       WHERE n.id = ANY($1::text[]) AND n.deleted_at IS NULL
      UNION ALL
-     SELECT fi.id, fi.vault_id, fi.folder_id, NULL::text, fi.created_at, v.organization_id
+     SELECT fi.id, fi.vault_id, fi.folder_id, fi.created_by, fi.created_at, v.organization_id
        FROM files fi JOIN vaults v ON v.id = fi.vault_id
       WHERE fi.id = ANY($1::text[])`,
     [docIds],
@@ -765,7 +765,7 @@ export interface DocLocation {
   vaultId: string;
   folderId: string | null;
   organizationId: string;
-  /** Creator of the note (null for files, which have no creator column). */
+  /** Creator of the note or tree file (null when its uploader is unknown). */
   createdBy: string | null;
   createdAt: Date;
 }
@@ -793,7 +793,7 @@ async function locateDoc(
        FROM (
          SELECT vault_id, folder_id, created_by, created_at FROM notes  WHERE id = $1 AND (deleted_at IS NULL OR $2::boolean)
          UNION ALL
-         SELECT vault_id, folder_id, NULL::text, created_at FROM files  WHERE id = $1
+         SELECT vault_id, folder_id, created_by, created_at FROM files  WHERE id = $1
        ) loc
        JOIN vaults v ON v.id = loc.vault_id
       LIMIT 1`,
@@ -1494,7 +1494,7 @@ export async function buildAccessContextFromIndex(
       organizationId: index.organizationId,
       docId: resourceId,
       folderIds: chain,
-      createdBy: note?.createdBy ?? null,
+      createdBy: loc.createdBy,
       createdAt: loc.createdAt,
     };
   }

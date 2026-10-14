@@ -507,19 +507,21 @@ The server **fails closed**: `BLOB_STORAGE=s3` with any of the three required
 vars missing is a fatal startup error naming what is absent, not a silent
 fallback to storing bytes in the database.
 
-The Compose bundle ships a MinIO service behind a profile, so nothing about
-`docker compose up -d` changes unless you ask for it:
+The Compose bundle keeps MinIO in a separate, explicitly included file.
+Plain `docker compose up -d` uses PostgreSQL and needs no MinIO credentials.
+For MinIO, set `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD` in `.env`, then run
+from `deploy/compose`:
 
 ```bash
-docker compose --profile minio up -d minio
-docker compose exec minio mc alias set local http://localhost:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"
-docker compose exec minio mc mb local/baalda
+docker compose -f docker-compose.yml -f docker-compose.minio.yml up -d minio
+docker compose -f docker-compose.yml -f docker-compose.minio.yml exec minio sh -c 'mc alias set local http://localhost:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" && mc mb --ignore-existing local/baalda'
 ```
 
-Then uncomment the `S3_*` block in `x-server-env` and restart the server. Read
-the comments above the `minio` service before you do — the endpoint you sign
-has to be one your CLIENTS can reach, which is not the same as one the server
-can reach.
+This starts the object store only. Follow the
+[Compose MinIO setup guide](../deploy/compose/README.md#optional-minio-storage)
+to configure the server's `BLOB_STORAGE` and `S3_*` settings, publish a
+client-reachable endpoint, and restart with both Compose files. Upload URLs
+must be reachable by clients even if downloads are proxied by the server.
 
 ### Bucket CORS
 

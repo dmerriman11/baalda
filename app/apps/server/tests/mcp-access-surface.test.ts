@@ -133,6 +133,7 @@ describe("MCP access-management HTTP surface", () => {
       "delete_note",
       "delete_file",
       "move_file",
+      "list_access_audit",
       "create_folder",
       "delete_folder",
       "move_note",
@@ -173,6 +174,7 @@ describe("MCP access-management HTTP surface", () => {
       "read_attachment_text",
       "get_access_default",
       "list_resource_access",
+      "list_access_audit",
     ]);
     const destructive = new Set([
       "delete_note",

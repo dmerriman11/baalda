@@ -63,7 +63,10 @@ describe("Member access board", () => {
     api.setBulkAccess.mockImplementation(async (_org: string, input: { resources: Array<{ resourceType: string; resourceId: string }>; mode: string }) => {
       for (const r of input.resources) {
         if (r.resourceType === "vault") for (const id of Object.keys(modes)) modes[id] = input.mode;
-        else modes[r.resourceId] = input.mode;
+        else {
+          modes[r.resourceId] = input.mode;
+          if (r.resourceId === "f1") modes.n1 = input.mode; // folder subtree
+        }
       }
       return { mode: input.mode, resourcesChanged: 1, overridesCleared: 0, membersAffected: 1, disconnectedDocs: 0 };
     });
@@ -306,6 +309,47 @@ describe("Member access board", () => {
     });
     expect(names("private")).toContain("Welcome");
     expect(toast).toHaveBeenCalledWith("Sara can no longer open Welcome.");
+  });
+
+  it("Add all to No access targets existing items, including binaries, without changing the vault default", async () => {
+    const tree = await api.listAccessTree();
+    api.listAccessTree.mockResolvedValue({ ...tree, files: [{ id: "b1", path: "Guide.pdf" }] });
+    modes.b1 = "open";
+    await render({ personVaultMode: "open", isSelf: true });
+    await act(async () => button("No access actions").click());
+    const add = [...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]')]
+      .find((li) => li.textContent?.startsWith("Add all"))!;
+    await act(async () => add.click());
+    expect(dialog()?.textContent).toContain("Move all existing items to No access?");
+    expect(api.setBulkAccess).not.toHaveBeenCalled();
+    await act(async () => dialogButton("Remove access").click());
+    await settle();
+    const input = api.setBulkAccess.mock.calls[0][1];
+    expect(input.mode).toBe("private");
+    expect(input.resources).toHaveLength(4);
+    expect(input.resources).toEqual(expect.arrayContaining([
+      { resourceType: "folder", resourceId: "f1" },
+      { resourceType: "file", resourceId: "n2" },
+      { resourceType: "file", resourceId: "n3" },
+      { resourceType: "file", resourceId: "b1" },
+    ]));
+    expect(selfMark).toHaveBeenCalledWith(expect.not.arrayContaining(["org-1"]));
+    expect(onChanged).not.toHaveBeenCalled();
+    expect(onItemWritten).toHaveBeenCalledTimes(1);
+    await expandAll();
+    expect(names("private")).toEqual(expect.arrayContaining(["Specs", "API", "Welcome", "Roadmap", "Guide.pdf"]));
+  });
+
+  it("Add all in an empty vault never becomes a vault-wide write", async () => {
+    api.listAccessTree.mockResolvedValue({ folders: [], notes: [], files: [] });
+    await render({ personVaultMode: "open" });
+    await act(async () => button("No access actions").click());
+    const add = [...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]')]
+      .find((li) => li.textContent?.startsWith("Add all"))!;
+    await act(async () => add.click());
+    expect(dialog()).toBeNull();
+    expect(api.setBulkAccess).not.toHaveBeenCalled();
+    expect(onChanged).not.toHaveBeenCalled();
   });
 
   it("grey ancestor rows show the path but are not interactive", async () => {
@@ -581,7 +625,14 @@ describe("Member access board", () => {
       await openMenu("Can view actions", "Add all");
       await settle();
       expect(api.setBulkAccess).toHaveBeenCalledTimes(1);
-      expect(api.setBulkAccess.mock.calls[0][1]).toMatchObject({ resources: [{ resourceType: "vault", resourceId: "org-1" }], mode: "readonly" });
+      expect(api.setBulkAccess.mock.calls[0][1]).toMatchObject({
+        resources: expect.arrayContaining([
+          { resourceType: "folder", resourceId: "f1" },
+          { resourceType: "file", resourceId: "n2" },
+          { resourceType: "file", resourceId: "n3" },
+        ]), mode: "readonly",
+      });
+      expect(api.setBulkAccess.mock.calls[0][1].resources).toHaveLength(3);
       expect(api.setBulkAccess.mock.calls[0][2]).toEqual({ timeoutMs: 30_000 });
       expect(names("private")).toEqual(["Specs", "API", "Roadmap", "Welcome"]);
       expect(names("readonly")).toEqual([]);

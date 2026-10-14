@@ -8,6 +8,7 @@ import {
   freezeVaultRoot,
   seedFolder,
   seedLock,
+  seedItemPrivate,
   seedMember,
   seedNote,
   seedOrg,
@@ -17,6 +18,8 @@ import {
   seedVaultGrant,
 } from "./helpers/seed.js";
 import { createMcpToken, listMcpTokens } from "../src/mcp/tokens.js";
+import { listVisibleFolders } from "../src/permissions/vault-docs.js";
+import { effectivePermission } from "../src/permissions/resolver.js";
 import { resetMcpBadTokens } from "../src/http/routes/mcp.js";
 
 /**
@@ -84,6 +87,85 @@ describe("MCP server", () => {
   });
   afterAll(async () => {
     await pool.end();
+  });
+
+  it("inherits restricted parent access on MCP creates and lists empty folders for named readers", async () => {
+    const owner = await seedUser("owner@restricted.test");
+    const reader = await seedUser("reader@restricted.test");
+    const excluded = await seedUser("excluded@restricted.test");
+    const org = await seedOrg("Restricted", "restricted-mcp");
+    await seedMember(org, owner, "owner");
+    await seedMember(org, reader, "admin");
+    await seedMember(org, excluded, "member");
+    const vault = await seedVault(org);
+    await seedVaultGrant(org, "edit");
+    const parent = await seedFolder(vault, null, "Finance", "Finance", owner);
+    await seedItemPrivate(org, "folder", parent);
+    await seedShare(org, "folder", parent, owner, "edit");
+    await seedShare(org, "folder", parent, reader, "view");
+    const token = await tokenFor(owner, org);
+    const created = await call(token, "create_folder", {
+      vaultId: vault, name: "Confidential", path: "Finance/Confidential",
+    });
+    expect(created.isError).toBe(false);
+    expect(registryBroadcasts).toContainEqual({ vaultId: vault, originId: null });
+    const child = created.data.folderId;
+    // No copied team grant may widen the parent's restriction.
+    expect((await pool.query("SELECT id FROM shares WHERE resource_id = $1", [child])).rows).toEqual([]);
+    expect((await listVisibleFolders(excluded, vault)).map(f => f.id)).not.toContain(child);
+    expect((await listVisibleFolders(reader, vault)).map(f => f.id)).toEqual(expect.arrayContaining([parent, child]));
+    const hiddenFolders = await call(await tokenFor(excluded, org), "list_folders", { vaultId: vault });
+    expect(hiddenFolders.data.results.map((f: { folderId: string }) => f.folderId)).not.toContain(child);
+    const visibleFolders = await call(await tokenFor(reader, org), "list_folders", { vaultId: vault });
+    expect(visibleFolders.data.results.map((f: { folderId: string }) => f.folderId)).toContain(child);
+    const note = await seedNote(vault, child, "Finance/Confidential/budget.md", owner);
+    expect(await effectivePermission(excluded, note)).toBe("none");
+    expect(await effectivePermission(reader, note)).toBe("view");
+    expect(await effectivePermission(owner, note)).toBe("edit");
+  });
+
+  it("lists an EMPTY item-Private folder to a plain member who holds a personal folder grant", async () => {
+    const owner = await seedUser("owner@empty-grant.test");
+    const named = await seedUser("named@empty-grant.test");
+    const excluded = await seedUser("excluded@empty-grant.test");
+    const org = await seedOrg("EmptyGrant", "empty-grant");
+    await seedMember(org, owner, "owner");
+    await seedMember(org, named, "member");
+    await seedMember(org, excluded, "member");
+    const vault = await seedVault(org);
+    await seedVaultGrant(org, "edit");
+    const parent = await seedFolder(vault, null, "Board", "Board", owner);
+    const child = await seedFolder(vault, parent, "Minutes", "Board/Minutes", owner);
+    await seedItemPrivate(org, "folder", parent);
+    await seedShare(org, "folder", parent, named, "view");
+    // No note anywhere: only the folder-based personal grant can surface them.
+    expect((await listVisibleFolders(named, vault)).map(f => f.id)).toEqual(expect.arrayContaining([parent, child]));
+    const excludedIds = (await listVisibleFolders(excluded, vault)).map(f => f.id);
+    expect(excludedIds).not.toContain(parent);
+    expect(excludedIds).not.toContain(child);
+    const listed = await call(await tokenFor(named, org), "list_folders", { vaultId: vault });
+    expect(listed.data.results.map((f: { folderId: string }) => f.folderId)).toEqual(expect.arrayContaining([parent, child]));
+  });
+
+  it("a personal vault level lifts the Everyone deny on item-Private folders", async () => {
+    const owner = await seedUser("owner@personal-level.test");
+    const viewer = await seedUser("viewer@personal-level.test");
+    const excluded = await seedUser("excluded@personal-level.test");
+    const org = await seedOrg("PersonalLevel", "personal-level");
+    await seedMember(org, owner, "owner");
+    await seedMember(org, viewer, "member");
+    await seedMember(org, excluded, "member");
+    const vault = await seedVault(org);
+    await seedVaultGrant(org, "edit");
+    const hidden = await seedFolder(vault, null, "Payroll", "Payroll", owner);
+    await seedItemPrivate(org, "folder", hidden);
+    await pool.query(
+      `INSERT INTO shares (id, org_id, resource_type, resource_id, principal_type, principal_id, permission)
+       VALUES ($1, $2, 'vault', $2, 'user', $3, 'view')`,
+      [randomUUID(), org, viewer],
+    );
+    expect((await listVisibleFolders(viewer, vault)).map(f => f.id)).toContain(hidden);
+    expect((await listVisibleFolders(excluded, vault)).map(f => f.id)).not.toContain(hidden);
   });
 
   it("rejects missing/invalid tokens with 401", async () => {

@@ -776,7 +776,13 @@ interface AppStore {
    * sign-up it required). Same rules as signing in.
    */
   landAfterAuth: () => Promise<void>;
-  setServerUrl: (url: string) => Promise<void>;
+  /**
+   * Switch (or reconnect) to `url`. Resolves `true` once this switch landed,
+   * `false` when another auth flow took over meanwhile (an invite link's
+   * Connect, a sign-in) and cancelled it; throws when it failed, after putting
+   * the previous server back.
+   */
+  setServerUrl: (url: string) => Promise<boolean>;
 
   // Account profile & preferences
   /** Update display name / avatar (server-backed; refreshes the session). */
@@ -1742,6 +1748,42 @@ function probeFolderSync(
  * opened. `disable()` aborts the vault scope, clears every timer it owns, and
  * resets the registry's in-memory maps + serverVaultId.
  */
+/**
+ * `setServerUrl` could not adopt the new address (the config/keychain write
+ * failed, or the new server's session check threw). Put the client back on the
+ * previous server and re-hydrate it, so the user is not left signed in with no
+ * vault and empty vault lists until a reload.
+ */
+async function recoverFromFailedServerSwitch(
+  get: () => AppStore,
+  set: (partial: Partial<AppStore>) => void,
+  previousUrl: string,
+  wasSyncing: boolean,
+): Promise<void> {
+  let session = get().session;
+  if (normalizeServerUrl(authManager.getServerUrl()) !== normalizeServerUrl(previousUrl)) {
+    // The client moved before failing: point it back at the old server.
+    try {
+      session = await authManager.setServerUrl(previousUrl);
+    } catch (err) {
+      console.warn("[auth] could not restore the previous server", err);
+      session = null;
+    }
+  }
+  set({
+    serverUrl: authManager.getServerUrl(),
+    session,
+    authStatus: session ? "signed-in" : "signed-out",
+  });
+  if (!session) return;
+  try {
+    await get().refreshVault();
+    if (wasSyncing) await get().enableSyncForVault();
+  } catch (err) {
+    console.warn("[auth] could not re-hydrate the previous server", err);
+  }
+}
+
 function leaveVaultSync(): void {
   syncManager.disable();
 }
@@ -1890,6 +1932,8 @@ function vaultScopedSyncReset() {
     rootFrozen: false,
     // Tabs are paths, and paths only mean something inside the vault that
     // minted them — every vault leave/switch spreads this reset.
+    openNote: null,
+    openingNotePath: null,
     openTabs: [] as string[],
     virtualTabs: [] as VirtualTab[],
     activeVirtualTab: null as string | null,
@@ -1981,7 +2025,6 @@ async function unsyncLocalTeardown(
 export const useStore = create<AppStore>((set, get) => ({
   vault: null,
   tree: null,
-  openNote: null,
   openVirtualTab: (tab) =>
     set((s) => ({ virtualTabs: upsertTab(s.virtualTabs, tab), activeVirtualTab: tab.id, homeActivation: null })),
   activateVirtualTab: (id) => set({ activeVirtualTab: id, homeActivation: null }),
@@ -2077,7 +2120,6 @@ export const useStore = create<AppStore>((set, get) => ({
   },
   landingVault: false,
   switchingVault: null,
-  openingNotePath: null,
   organizations: [],
   members: [],
   pendingInvitations: [],
@@ -2639,7 +2681,7 @@ export const useStore = create<AppStore>((set, get) => ({
     } finally {
       // Only the newest open clears it: two quick clicks would otherwise have the
       // first one's completion cancel the second one's indicator.
-      if (get().openingNotePath === path) set({ openingNotePath: null });
+      if (stillOpening()) set({ openingNotePath: null });
     }
   },
 
@@ -3474,8 +3516,38 @@ export const useStore = create<AppStore>((set, get) => ({
     set({ authError: null });
     // This flow owns the session from here: a detached `initAuth` still
     // restoring the previous one must not land its state on top of ours.
-    ++authInitGen;
-    const session = await authManager.setServerUrl(url);
+    const gen = ++authInitGen;
+    const previousUrl = get().serverUrl;
+    const switching = normalizeServerUrl(url) !== normalizeServerUrl(previousUrl);
+    // Persist pending edits before closing the old vault. A failed flush aborts
+    // the switch so the editor still owns the unsaved buffer.
+    await bridgeManager.currentBridge()?.flushEgest();
+    if (authInitGen !== gen) return false;
+    const wasSyncing = get().syncEnabled;
+    // Stop syncing with the old server before the address changes. The folder
+    // itself stays open until the new address is adopted, so a switch that
+    // fails (the address could not be saved) falls back to it intact.
+    leaveVaultSync();
+    set({ syncEnabled: false });
+    let session: SessionInfo | null;
+    try {
+      // Clears the old bearer before exposing the new base URL.
+      session = await authManager.setServerUrl(url);
+    } catch (e) {
+      if (authInitGen === gen) await recoverFromFailedServerSwitch(get, set, previousUrl, wasSyncing);
+      throw e;
+    }
+    if (switching) {
+      // The client now talks to the new server: the old folder and its
+      // vault/billing state belong to the previous one, even if another flow
+      // has taken over the session meanwhile.
+      get().closeLocalVault();
+      set({
+        organizations: [], members: [], pendingInvitations: [], userInvitations: [],
+        billingConfig: null, orgBilling: null, myBilling: null,
+      });
+    }
+    if (authInitGen !== gen) return false;
     set({
       serverUrl: authManager.getServerUrl(),
       session,
@@ -3485,7 +3557,9 @@ export const useStore = create<AppStore>((set, get) => ({
       await get().refreshVault();
       await get().refreshBillingConfig();
       await get().refreshOrgBilling();
-      await get().enableSyncForVault();
+      // The previous folder belongs to the old server. The vault picker opens
+      // a destination vault explicitly instead of reconciling that folder here.
+      if (!switching) await get().enableSyncForVault();
       // An invitation link that named THIS server parked itself here waiting
       // for the user's Connect click (`openInviteLink` step 2). The click has
       // landed, so pick it back up — otherwise confirming the server silently
@@ -3499,6 +3573,7 @@ export const useStore = create<AppStore>((set, get) => ({
       // unrelated sign-in.
       if (peekPendingInvite()) await promptSignInForQueuedInvite(set);
     }
+    return true;
   },
 
   updateProfile: async ({ name, image }) => {
@@ -3917,6 +3992,10 @@ export const useStore = create<AppStore>((set, get) => ({
       ) {
         rememberOrgVault(previousOrgId, currentVaultPath);
       }
+
+      // Finish the editor's durable write before changing the vault epoch.
+      await bridgeManager.currentBridge()?.flushEgest();
+      if (superseded()) return;
 
       // Stop syncing the vault we're leaving before anything else. Everything
       // below awaits the network, and one branch swaps the Rust vault slot

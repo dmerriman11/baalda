@@ -63,6 +63,15 @@ describe("summarizeReconcile", () => {
 });
 
 describe("keptLocally, read-only", () => {
+  it("counts revoked attachments and points to recovery copies", () => {
+    const [line] = summarizeReconcile([
+      item({ kind: "keptLocally", path: "report.pdf", detail: ".context/trash/s/report.pdf" }),
+      item({ kind: "keptLocally", path: "image.png", detail: ".context/trash/s/image.png" }),
+    ]);
+    expect(line.count).toBe(2);
+    expect(line.text).toContain("2 files were moved to .context/trash");
+    expect(line.text).toContain("Activity");
+  });
   const RO = "read-only: your edit was not accepted; a copy is in .context/trash";
   it("does not claim lost access for a read-only rejection", () => {
     const [line] = summarizeReconcile([item({ kind: "keptLocally", path: "a.md", docId: "1", detail: RO })]);
@@ -79,6 +88,17 @@ describe("keptLocally, read-only", () => {
     ]);
     expect(mixed.text).toBe(
       "2 notes are kept on this device only: you no longer have access, or can only read them. Copies are in .context/trash.",
+    );
+  });
+  it("describes notes and binaries separately when one group mixes them", () => {
+    const [line] = summarizeReconcile([
+      item({ kind: "keptLocally", path: "a.md", docId: "1", detail: RO }),
+      item({ kind: "keptLocally", path: "report.pdf", detail: ".context/trash/s/report.pdf" }),
+    ]);
+    expect(line.count).toBe(2);
+    expect(line.text).toBe(
+      "1 note is read-only for you, so your edit was not accepted. A copy is in .context/trash. " +
+        "1 file was moved to .context/trash because access was removed. You can find the recovery copies in Activity.",
     );
   });
 });

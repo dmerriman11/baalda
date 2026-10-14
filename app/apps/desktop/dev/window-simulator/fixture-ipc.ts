@@ -36,6 +36,12 @@ let types = JSON.stringify({
 let copies: TrashCopy[] = [
   {
     stamp: "2026-10-05T090000",
+    relPath: "Attachments/Quarterly report.pdf",
+    bytes: 32140,
+    modified: started,
+  },
+  {
+    stamp: "2026-10-05T090000",
     relPath: "Q3 plan.md",
     bytes: 1240,
     modified: started - day,

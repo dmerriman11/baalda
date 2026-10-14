@@ -109,6 +109,9 @@ describe("DocSync keeps a view-only grant across a reconnect", () => {
     // An editable token clears it: a grant that changed since is picked up.
     await captured.handlers!.token();
     expect(sync.readOnly).toBe(false);
+    captured.handlers!.onSynced?.();
+    expect(sync.status).toBe("synced");
+    sync.destroy();
   });
 });
 

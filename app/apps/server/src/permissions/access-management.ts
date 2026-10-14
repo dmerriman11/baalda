@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { setAuditActor, withAuditActor } from "../audit/access.js";
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { pool as defaultPool } from "../db/pool.js";
@@ -93,19 +94,21 @@ export async function setJoinDefault(
   organizationId: string,
   userId: string,
   mode: AccessMode,
-  db: Queryable = defaultPool,
+  db: pg.Pool = defaultPool,
 ): Promise<AccessMode> {
   await requireAccessManager(organizationId, userId, db);
-  await ensureSettings(db, organizationId);
-  const { rows } = await db.query<{ join_default: AccessMode }>(
-    `UPDATE organization_access_settings
-        SET join_default = $2, updated_at = now()
-      WHERE organization_id = $1
-      RETURNING join_default`,
-    [organizationId, mode],
-  );
-  if (!rows[0]) throw new AccessManagementError("Vault not found", 404, "vault_not_found");
-  return rows[0].join_default;
+  return withAuditActor(userId, async (client) => {
+    await ensureSettings(client, organizationId);
+    const { rows } = await client.query<{ join_default: AccessMode }>(
+      `UPDATE organization_access_settings
+          SET join_default = $2, updated_at = now()
+        WHERE organization_id = $1
+        RETURNING join_default`,
+      [organizationId, mode],
+    );
+    if (!rows[0]) throw new AccessManagementError("Vault not found", 404, "vault_not_found");
+    return rows[0].join_default;
+  }, db);
 }
 
 /** Allocate one ordering point for an ACL mutation within an organization. */
@@ -293,6 +296,7 @@ export async function applyBulkAccess(
   let cleared = 0;
   try {
     await client.query("BEGIN");
+    await setAuditActor(client, input.actorUserId);
     const revision = await nextAccessRevision(client, input.organizationId);
     for (const resource of resources) {
       cleared += await clearResourceOverrides(

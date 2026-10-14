@@ -393,9 +393,13 @@ const DOC_STATUS_OWNS_BADGE: ReadonlySet<SyncStatus> = new Set<SyncStatus>([
 ]);
 
 export class SyncManager implements InboundHost {
-  readonly registry = new VaultRegistry(api);
+  registry = new VaultRegistry(api);
 
   constructor() {
+    this.configureRegistry();
+  }
+
+  private configureRegistry(): void {
     // Every confirmed push, on every path (batch, per-doc uploader, one-step
     // create, open-note confirm), clears that doc's failure rows: the sidebar
     // badge and the failure list must never disagree.
@@ -4832,6 +4836,7 @@ export class SyncManager implements InboundHost {
     // Retire whatever was running for the previous vault BEFORE any await, so no
     // old-vault work can interleave with this reconcile.
     this.teardown();
+    const registry = this.registry;
     const scope = vaultScopes.begin({
       orgId: vault.orgId,
       vaultPath: vault.path,
@@ -4845,11 +4850,11 @@ export class SyncManager implements InboundHost {
     let cleanupActive = false;
     const progress = new SyncProgressReporter({
       onProgress: (p) => {
-        if (cleanupActive) return;
+        if (!scope.isCurrent() || cleanupActive) return;
         this.logRunPhase(p);
         this.onSyncProgress?.(this.withRefusals(this.withUploadBacklog(p)));
       },
-      onDocState: (patch) => this.onDocState?.(patch),
+      onDocState: (patch) => { if (scope.isCurrent()) this.onDocState?.(patch); },
     });
     this.progress = progress;
     // The registry writes into the SHARED reporter, but its COUNTERS are muted
@@ -4860,7 +4865,7 @@ export class SyncManager implements InboundHost {
     // they are keyed by docId, so concurrent writers cannot garble them.
     const cleanup = new SyncProgressReporter({
       onProgress: (p) => {
-        if (!cleanupActive) return;
+        if (!scope.isCurrent() || !cleanupActive) return;
         this.logRunPhase(p);
         this.onSyncProgress?.(p);
       },
@@ -4868,7 +4873,7 @@ export class SyncManager implements InboundHost {
     });
     this.cleanupProgress = cleanup;
     const counterOwned = (): boolean => this.bulkPhase || this.contentRunInFlight() || this.downloadPhase;
-    this.registry.setProgressSink({
+    registry.setProgressSink({
       phase: (p, t) => {
         if (p === "removing") {
           cleanupActive = true;
@@ -4904,7 +4909,7 @@ export class SyncManager implements InboundHost {
     // the doc. Best-effort: a folder with no (or a foreign) stamp doesn't prime,
     // and a broken config must not fail the enable.
     try {
-      if (await this.registry.primeLocal(vault.orgId)) {
+      if (await registry.primeLocal(vault.orgId)) {
         if (!scope.isCurrent()) return { ok: false, reason: "vault changed", scope };
         this.primed = true;
         // Sidebar badges + `store.docIdByPath`, immediately.
@@ -4928,6 +4933,7 @@ export class SyncManager implements InboundHost {
     } catch (e) {
       console.warn("[sync] local prime failed; falling back to reconcile-first", e);
     }
+    if (!scope.isCurrent()) return { ok: false, reason: "vault changed", scope };
     // ---- PHASE B: the networked reconcile. Unchanged. ----
     try {
       // The registry reads the vault tree itself (the FULL recursive walk); it
@@ -4938,13 +4944,13 @@ export class SyncManager implements InboundHost {
       this.enableReconciling = true;
       let reconciled: { seeded: boolean };
       try {
-        reconciled = await this.registry.reconcile({
+        reconciled = await registry.reconcile({
           organizationId: session.activeOrganizationId,
           vaultName: vault.name,
           seedIfEmpty: vault.seedIfEmpty,
         });
       } finally {
-        this.enableReconciling = false;
+        if (scope.isCurrent()) this.enableReconciling = false;
       }
       const { seeded } = reconciled;
       // The user may have switched vaults during the reconcile. Bringing sync up
@@ -4979,7 +4985,7 @@ export class SyncManager implements InboundHost {
       // two id spaces.
       this.lastCrdtSweepAt = Date.now();
       void collectCrdtGarbage(
-        { registryDocIds: () => this.registry.allDocIds() },
+        { registryDocIds: () => registry.allDocIds() },
         { epoch: scope.vaultEpoch ?? undefined, pinned: this.crdtSweepPinned() },
       );
       this.setupAttachments(scope);
@@ -5007,7 +5013,7 @@ export class SyncManager implements InboundHost {
       // Background, like the content run it replaces — `enable` must return as
       // soon as the vault is usable or "Turn on sync" blocks the UI for the
       // whole backfill.
-      if (useBulkPath(this.registry.mappedNotes().length)) {
+      if (useBulkPath(registry.mappedNotes().length)) {
         this.bulkRun = this.runBulkEngine(scope).catch((e) => {
           console.warn("[sync] bulk sync failed", e);
         });
@@ -5016,7 +5022,7 @@ export class SyncManager implements InboundHost {
         // the pull's), but never leave deferred notes without a file.
         void this.materializeDeferred();
       }
-      if (!useBulkPath(this.registry.mappedNotes().length) && this.vaultEngineLiveOnly) {
+      if (!useBulkPath(registry.mappedNotes().length) && this.vaultEngineLiveOnly) {
         // The prime window sized the channel from the LOCAL doc map and put it
         // in live-only mode; the reconcile then found a vault below the
         // threshold. Nothing is going to page it down over HTTP, so give the
@@ -5313,7 +5319,8 @@ export class SyncManager implements InboundHost {
   }
 
   private async runBulkEngine(scope: VaultScope): Promise<void> {
-    const vaultId = this.registry.vaultId;
+    const registry = this.registry;
+    const vaultId = registry.vaultId;
     const store = this.docStore;
     const progress = this.progress;
     if (!vaultId || !store || !progress) {
@@ -5373,7 +5380,7 @@ export class SyncManager implements InboundHost {
     if (!scope.isCurrent()) return;
     // Durably record everything the phase confirmed BEFORE anything claims the
     // vault is settled: this is the resume point a kill -9 falls back to.
-    await this.registry.flushCheckpoint();
+    await registry.flushCheckpoint();
     if (!scope.isCurrent()) return;
     // Back to an ordinary channel (see step 4 above). A no-op when the engine
     // was never put in live-only mode — below the threshold nothing here ran.
@@ -5387,6 +5394,7 @@ export class SyncManager implements InboundHost {
     vaultId: string,
     store: VaultDocStore,
   ): Promise<Awaited<ReturnType<BootstrapRunner["run"]>> | null> {
+    const registry = this.registry;
     const runner: BootstrapRunner = new BootstrapRunner({
       serverVaultId: vaultId,
       progress: this.progress ?? undefined,
@@ -5410,14 +5418,14 @@ export class SyncManager implements InboundHost {
           return store.knownDocs();
         },
         markPushed: (docId) => {
-          this.registry.markPushed(docId);
+          registry.markPushed(docId);
           this.serverEmpty.delete(docId);
           this.serverBehind.delete(docId);
         },
-        markMaterialized: (relPath) => this.registry.markMaterialized(relPath),
-        loadResume: () => this.registry.bootstrapResume(),
-        saveResume: (state) => this.registry.setBootstrapResume(state),
-        flushCheckpoint: () => this.registry.flushCheckpoint(),
+        markMaterialized: (relPath) => registry.markMaterialized(relPath),
+        loadResume: () => registry.bootstrapResume(),
+        saveResume: (state) => registry.setBootstrapResume(state),
+        flushCheckpoint: () => registry.flushCheckpoint(),
       },
     });
     this.bootstrapRunner = runner;
@@ -5443,8 +5451,9 @@ export class SyncManager implements InboundHost {
     serverEmpty: Set<string>,
     conflicts: Set<string>,
   ): Promise<Awaited<ReturnType<DocBatchPusher["run"]>> | null> {
+    const registry = this.registry;
     const open = store.suppressedDoc();
-    const work: DocPushWork[] = this.registry
+    const work: DocPushWork[] = registry
       .mappedNotes()
       .filter(
         (n) =>
@@ -5457,7 +5466,7 @@ export class SyncManager implements InboundHost {
           !conflicts.has(n.docId) &&
           (serverEmpty.has(n.docId) ||
             this.serverBehind.has(n.docId) ||
-            !this.registry.isPushed(n.docId)),
+            !registry.isPushed(n.docId)),
       )
       .map((n) => ({
         docId: n.docId,
@@ -6158,6 +6167,7 @@ export class SyncManager implements InboundHost {
   private teardown(): void {
     this.enabled = false;
     this.primed = false;
+    this.enableReconciling = false;
     // Link refusals name paths in the vault we are leaving.
     resetLinkRefusals();
     // A pending badge hold belongs to the vault we are leaving; letting it fire
@@ -6295,11 +6305,12 @@ export class SyncManager implements InboundHost {
     this.clearVaultPresence();
     this.stopVaultEngine();
     this.closeCurrent();
-    // The registry is a process singleton: a surviving `serverVaultId` + path
-    // maps are precisely what let vault A's ids be applied to vault B's tree.
-    // (`reset` also disposes its config-checkpointer synchronously, so a pending
-    // flush can't write this vault's doc map into the next one.)
-    this.registry.reset();
+    // Never rebind an object with suspended async work to another vault. A
+    // reset alone lets old awaits resume against the next session's live scope.
+    if (this.registry.retire) this.registry.retire();
+    else this.registry.reset(); // lightweight test doubles
+    this.registry = new VaultRegistry(api);
+    this.configureRegistry();
     // Nulls the store's `syncProgress`, so a half-finished count from the vault we
     // just left is never on screen.
     this.cleanupProgress?.dispose();
@@ -6881,7 +6892,8 @@ export class SyncManager implements InboundHost {
    *  Bound to `scope`: the captured `vaultId` is only valid while that vault is
    *  open, so both the pass guard and the pinned IPC epoch reference it. */
   private setupAttachments(scope: VaultScope): void {
-    const vaultId = this.registry.vaultId;
+    const registry = this.registry;
+    const vaultId = registry.vaultId;
     if (!vaultId) {
       this.attachments?.stop();
       this.attachments = null;
@@ -6908,16 +6920,16 @@ export class SyncManager implements InboundHost {
       exists: (relPath) => ipc.binaryExists(relPath, epoch),
       listLocal: () => ipc.listBinaries(epoch),
       listServer: () => api.listVaultBlobs(vaultId),
-      fileId: (relPath) => this.registry.getFileId(relPath),
+      fileId: (relPath) => registry.getFileId(relPath),
       // The mirror caches ids per path too, and consults that cache BEFORE the
       // registry. Forgetting only the registry's copy left the dead id live for
       // the rest of the session: a file that came back uploaded under a row
       // the server had just deleted, and failed on every pass.
       forgetFileId: (relPath) => {
-        this.registry.forgetFileId(relPath);
+        registry.forgetFileId(relPath);
         this.attachments?.forgetFile(relPath);
       },
-      moveFileId: (from, to) => this.registry.moveFileId(from, to),
+      moveFileId: (from, to) => registry.moveFileId(from, to),
       deleteFile: (id) => api.deleteFile(id),
       // Never forced: a 409 means a note still embeds those bytes, and that
       // refusal is the whole reason the flag exists.
@@ -6963,7 +6975,7 @@ export class SyncManager implements InboundHost {
       writeTreeLocal: (relPath, bytes) => ipc.writeTreeBinary(relPath, bytes, epoch),
       // Our own write, so its watcher echo is not an external edit — the same
       // one-echo-per-path claim the registry makes for a materialized note.
-      markMaterialized: (relPath) => this.registry.markMaterialized(relPath),
+      markMaterialized: (relPath) => registry.markMaterialized(relPath),
       // A file inside an open delete window is not a file this device is
       // missing — without this the debounced pass downloads it back before the
       // queue has even decided.
@@ -7013,7 +7025,7 @@ export class SyncManager implements InboundHost {
       // ---- Tree binaries: the `files` row that carries their ACL ----------
       localFileIds: async () =>
         new Map((await ipc.listFileRows()).map((r) => [r.path, r.id])),
-      knownFileId: (relPath) => this.registry.getFileId(relPath),
+      knownFileId: (relPath) => registry.getFileId(relPath),
       registerFile: async ({ relPath, id }) => {
         const row = await api.registerFile({ vaultId, id, path: relPath });
         // The server echoes the row's own id — which is ours today, and is what
@@ -7047,14 +7059,14 @@ export class SyncManager implements InboundHost {
             error: r.error,
           })),
         ),
-      rememberFileId: (relPath, id, opts) => this.registry.setFileId(relPath, id, opts),
+      rememberFileId: (relPath, id, opts) => registry.setFileId(relPath, id, opts),
       // A row is not its bytes. This is the separate, stronger claim that lets a
       // revocation remove the file (`registry.confirmFileBytes`).
-      confirmFileBytes: (relPath) => this.registry.confirmFileBytes(relPath),
+      confirmFileBytes: (relPath) => registry.confirmFileBytes(relPath),
       // The three-way's base per `files` id, persisted in `.context/config.json`
       // so a restart still knows a teammate's edit from our own.
-      fileBase: (docId) => this.registry.getFileBase(docId),
-      setFileBase: (docId, sha) => this.registry.setFileBase(docId, sha),
+      fileBase: (docId) => registry.getFileBase(docId),
+      setFileBase: (docId, sha) => registry.setFileBase(docId, sha),
       // The recovery copy a server version replaces a divergent local one after.
       keepLocalCopy: (relPath) =>
         ipc.copyToTrash(relPath, trashStamp(), epoch),
@@ -7064,7 +7076,7 @@ export class SyncManager implements InboundHost {
       removeLocal: (relPath) => ipc.deleteFile(relPath, epoch).then(() => undefined),
       // The other half of an adoption: the path the row used to be at stops
       // naming it, so `.context/config.json` never holds two ids for one file.
-      forgetFileId: (relPath) => this.registry.forgetFileId(relPath),
+      forgetFileId: (relPath) => registry.forgetFileId(relPath),
       // Only ever used to drop a row THIS device minted for bytes the server
       // already holds under another id (`reconcileDedupedRow`).
       deleteFile: (id) => api.deleteFile(id),

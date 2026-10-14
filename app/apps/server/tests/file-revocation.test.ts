@@ -144,6 +144,19 @@ describe("a file set to Private", () => {
     expect(ready.revoked).toBeUndefined();
   });
 
+  it("does not revoke an owner's uploaded attachments on reconnect without a vault grant (#324)", async () => {
+    await pool.query("DELETE FROM shares WHERE org_id=$1", [orgId]);
+    await pool.query("UPDATE files SET created_by=$1 WHERE id=ANY($2::text[])", [owner.userId, [pdf, keptPdf]]);
+    await seedBlob(vault, orgId, "Team/guide.pdf", { docId: pdf });
+    const ready = await readyFor(owner.userId, vault, [pdf, keptPdf]);
+    expect(ready.revoked).toBeUndefined();
+    const check = await post(owner, `/api/vaults/${vault}/access-check`, { docIds: [pdf, keptPdf] });
+    expect(check.status).toBe(200);
+    expect((await check.json()).none).toEqual([]);
+    const listing = await (await get(owner, `/api/vaults/${vault}/blobs`)).json();
+    expect(listing.blobs.map((b: { docId: string }) => b.docId)).toContain(pdf);
+  });
+
   it("is ANSWERED by the access check, not left out of it", async () => {
     // The desktop's rule for an unanswered id is to keep the file — and to keep
     // the whole group with it. While this route queried `notes` only, every

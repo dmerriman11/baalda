@@ -189,6 +189,10 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
 
 ### Desktop — sync (`src/lib/sync/`)
 - `docSession.ts` (`syncManager`) — owns the registry, current `DocSync`, presence, attachments.
+  Each sync lifetime gets a fresh `VaultRegistry`; teardown permanently retires the previous one.
+  Never rebind a retired registry: suspended requests must retain the old scope and cannot write
+  another vault's files, identity map, baseline, progress, or selection. Flush the editor before
+  switching the vault epoch, and gate late note-open completions on that epoch.
 - `syncManager.ts` (`DocSync`) — `HocuspocusProvider` over the bridge's `Y.Doc`; doc name
   `vault:<vaultId>/note:<docId>`. Token is a **function** re-minted per (re)connect via `POST /api/sync-token`;
   403 → `no-access`. WS URL derived from the server URL (`deriveWsUrl`): ALWAYS same-origin
@@ -478,11 +482,13 @@ views, persisted per device in localStorage `context.memberAccess.view`: **List*
 checkbox tree with the "Across the vault" level) and **Board** (default; `MemberAccessBoard.tsx`, the same
 bulk-access writes, one resource per write): columns Can edit / Can view / No access, rows moved by
 drag-and-drop or arrows, grey ancestor rows showing only the path (up to 5 levels), a "Set
-everything to" menu with Reset to vault default and per-column Add all / Remove all. A single-row
+everything to" menu with Reset to vault default and per-column Add all / Remove all. Add all targets
+existing item roots (including their folder subtrees), never the vault resource; future root items
+keep the vault's existing default. An empty item selection is a no-op. A single-row
 move applies at once with no confirm and no undo; the app's standard toast states the result
 ("Sara can now view X."). **Confirms are for destructive changes only**, i.e. a target of No access
 (`private`): the Everyone row, a person's vault-wide level, a List row/note change, the board's Set
-everything to → No access, Remove all and Reset to vault default. Can view, Can edit, Add all, Set
+everything to → No access, Add all → No access, Remove all and Reset to vault default. Can view, Can edit, Set
 everything to → Can view and the New members row never confirm. Access levels are colour-coded
 everywhere (List and Members-table pills, board column headers, drag highlight, landing pulse):
 Can edit green, Can view amber, No access grey, Custom/Mixed neutral, from `--access-{edit,view,none}-{bg,fg}`
@@ -577,6 +583,14 @@ flow through the same sync server via `createDocWriter` so AI edits persist/broa
   `public-links` (`/api/notes/:docId/public-link` mint/inspect/revoke + public `GET /p/:token`
   read-only page — token is the capability; renders via the escape-first `render/note-html.ts`,
   no renderer deps).
+- `audit/access.ts` + migration 056 record share, membership and join-default changes in
+  `access_audit`, including actor, time and before/after values. Database triggers retain deletes
+  and roll back with the mutation; explicit transaction-local actor context covers HTTP/MCP writes.
+  Better Auth membership hooks enrich the recorded event with request identity (never confuse
+  the hook's target user with its actor). Unknown/system actors remain null; history begins at
+  migration, without fabricated backfill. Owners/admins read paginated history via
+  `GET /api/orgs/:orgId/access-audit?limit=100&before=<cursor>` or MCP `list_access_audit`.
+  No note content or credentials are recorded. There is no desktop history panel yet.
 - `billing/` — Polar behind `provider.ts`; `store.ts` is the ONLY writer of a `subscriptions` row and
   always persists the provider's returned state. One vault = one subscription (409 `already_subscribed`).
   `BILLING_MODEL=vault|team` (default `vault` until the production flip) picks the model. **`team`
@@ -989,3 +1003,25 @@ HTML previews compare file content on watcher notifications, including indexed
 `unchanged` echoes: the preview may still contain the empty pre-sync document even
 when the disk index already has the newly received content. Bridge echo guards
 remain unchanged, and identical HTML does not reload interactive frames.
+
+Restricted folder listings preserve per-user grants through an Everyone deny, including empty
+folders. Ancestors of a readable item remain visible as navigation paths without granting content
+access. MCP `list_folders` uses the same filtered listing. Deleted-note permission queries expand
+paths into ancestor prefixes and equijoin them; avoid restoring correlated prefix cross products.
+Read-only recovery refuses an empty server state over populated local bytes or CRDT content,
+matching the bridge's empty-write guard. Failed folder removals retain their server identities,
+including parent folders and across restart; filesystem failures are distinct from non-empty folders.
+
+Tree-file authorship uses `files.created_by` consistently in direct, prefetched and indexed
+permission resolution and readable-set listings. Explicit denies and vault postures still apply.
+Migration 057 records the owner as creator of null-creator files, notes and folders only in a sole-owner legacy vault with no ACL rows;
+it writes no share or audit row and never changes an explicit rule. Revoked confirmed attachments move
+atomically to `.context/trash` before their identity is forgotten. Failed recovery leaves the
+file and identity intact. Activity reports these copies and reveals binaries in the file manager;
+binary recovery must never use the Markdown comparison or text-restore pipeline.
+
+Account Settings → Connection remembers up to eight normalized server addresses locally,
+with tokens kept only in the per-server OS keychain. One server is active at a time.
+Switching flushes pending edits and closes the previous vault before changing the shared
+API client; clear the old bearer before exposing the new URL. Choose a destination vault
+explicitly after switching, rather than reconciling the previous server's local folder.

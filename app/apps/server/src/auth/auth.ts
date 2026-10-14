@@ -1,3 +1,4 @@
+import { attributeMembershipEvent, auditRequestActor } from "../audit/access.js";
 import { betterAuth } from "better-auth";
 import { APIError, createAuthMiddleware } from "better-auth/api";
 import { bearer, mcp, organization } from "better-auth/plugins";
@@ -372,12 +373,16 @@ export const auth = betterAuth({
         // A teammate accepted an invitation → announce to everyone live in the
         // vault so their roster refreshes and the join celebration fires.
         // (The join-code path bypasses Better Auth and announces itself; org
-        // creation adds the owner via `afterAddMember`, which we deliberately
-        // don't hook — no one should be "welcomed" to their own new vault.)
+        // creation adds the owner via `afterAddMember`; that hook only records
+        // audit identity, with no welcome announcement for one's own vault.)
         // Seats/vaults shrank: a lapsed account trimmed back under the Free
         // limits is lifted (billing/lapse.ts). Runs after Better Auth's write;
         // `onMembershipTrimmed` never throws.
+        afterAddMember: async ({ member }) => {
+          await attributeMembershipEvent(member.id, "insert", auditRequestActor.getStore() ?? null);
+        },
         afterRemoveMember: async ({ organization, member }) => {
+          await attributeMembershipEvent(member.id, "delete", auditRequestActor.getStore() ?? null);
           await onMembershipTrimmed(authPool, organization.id);
           // Better Auth's own remove-member endpoint: close the removed user's
           // live vault-channel sockets like DELETE /api/orgs/:orgId/members/:userId.
@@ -392,6 +397,7 @@ export const auth = betterAuth({
           await announceInvitationGone(invitation.id, { userId: user.id });
         },
         afterAcceptInvitation: async (data) => {
+          await attributeMembershipEvent(data.member.id, "insert", data.user.id);
           // Apply the access the inviter chose (invitation_access, m046). The
           // member row exists by now; best-effort, never fails the accept.
           await applyInvitationAccess({
@@ -412,6 +418,11 @@ export const auth = betterAuth({
           throw new APIError("FORBIDDEN", {
             message: "role_change_not_supported_here",
           });
+        },
+        // Unreachable while the refusal above stands; if it is ever lifted, the
+        // role change is still credited to the request's caller, not left null.
+        afterUpdateMemberRole: async ({ member }) => {
+          await attributeMembershipEvent(member.id, "update", auditRequestActor.getStore() ?? null);
         },
       },
     }),

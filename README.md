@@ -195,6 +195,10 @@ cp .env.example .env      # fill in POSTGRES_PASSWORD, JWT_SECRET, BETTER_AUTH_U
 docker compose up -d
 ```
 
+The default stack stores attachments in PostgreSQL and needs no MinIO credentials.
+For optional MinIO storage, explicitly include the additional Compose file as
+described in the [MinIO setup guide](deploy/compose/README.md#optional-minio-storage).
+
 See [`deploy/compose/README.md`](deploy/compose/README.md) for TLS, backups and
 upgrades, or [`docs/DEPLOY.md`](docs/DEPLOY.md) for plain Docker and the full
 environment variable reference.

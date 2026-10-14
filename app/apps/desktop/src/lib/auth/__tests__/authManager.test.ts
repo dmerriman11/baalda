@@ -162,3 +162,38 @@ describe("AuthManager.revalidateSession", () => {
     expect(ipc.keychainDelete).not.toHaveBeenCalled();
   });
 });
+
+describe("AuthManager server switching", () => {
+  it("clears the previous bearer before exposing a new server and restores each server's own session", async () => {
+    const events: string[] = [];
+    let persisted = "https://one.example";
+    let base = persisted;
+    let token: string | null = "one-token";
+    vi.mocked(ipc.setServerUrl).mockImplementation(async (url) => {
+      expect(base).toBe(persisted);
+      persisted = url!;
+    });
+    vi.mocked(ipc.getServerUrl).mockImplementation(async () => persisted);
+    vi.mocked(ipc.keychainGet).mockImplementation(async (key) => key.includes("two.example") ? "two-token" : "one-token");
+    const mgr = new AuthManager(fakeApi({
+      getBaseUrl: () => base,
+      setBaseUrl: (url) => { events.push(`${url}:${token}`); base = url; },
+      setToken: (value) => { token = value; },
+      getSession: vi.fn(async () => ({ user: { id: token!, email: "demo@example.com", name: "Demo" }, activeOrganizationId: null })),
+    }));
+    expect((await mgr.setServerUrl("https://two.example"))?.user.id).toBe("two-token");
+    expect(events[0]).toBe("https://two.example:null");
+    expect((await mgr.setServerUrl("https://one.example"))?.user.id).toBe("one-token");
+    expect(events[2]).toBe("https://one.example:null");
+  });
+
+  it("keeps the old client intact if persisting the destination fails", async () => {
+    vi.mocked(ipc.setServerUrl).mockRejectedValueOnce(new Error("disk full"));
+    const api = fakeApi({ setBaseUrl: vi.fn(), setToken: vi.fn() });
+    const mgr = new AuthManager(api);
+    await expect(mgr.setServerUrl("https://two.example")).rejects.toThrow("disk full");
+    expect(api.setBaseUrl).not.toHaveBeenCalled();
+    expect(api.setToken).not.toHaveBeenCalled();
+    expect(mgr.getServerUrl()).toBe("http://localhost:3010");
+  });
+});

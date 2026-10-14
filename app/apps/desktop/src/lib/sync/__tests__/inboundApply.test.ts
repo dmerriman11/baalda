@@ -18,6 +18,7 @@ vi.mock("../../ipc", () => ({
   deleteFilesBatch: vi.fn(),
   deleteFolderIfEmpty: vi.fn(),
   fileStat: vi.fn(),
+  binaryExists: vi.fn(),
   getDiskBase: vi.fn(),
   copyToTrash: vi.fn(),
   writeTrashCopy: vi.fn(),
@@ -101,6 +102,7 @@ class FakeDisk {
 }
 
 function install(disk: FakeDisk) {
+  vi.mocked(ipc.binaryExists).mockImplementation(async (path) => disk.binaries.has(path));
   vi.mocked(ipc.deleteFilesBatch).mockImplementation(async (items) => Promise.all(items.map(async (item) => {
     try {
       await ipc.deleteFile(item.path);
@@ -837,6 +839,49 @@ describe("inbound delete", () => {
 
 
 describe("inbound folder deletion", () => {
+  it("retries a failed remote folder removal without registering a replacement, including after restart", async () => {
+    const disk = new FakeDisk();
+    disk.folders.add("Team");
+    disk.folders.add("Team/Sub");
+    const { api } = await twoPasses({
+      disk,
+      first: { notes: [], folders: [{ id: "f1", path: "Team" }, { id: "f2", path: "Team/Sub" }] },
+      then: { notes: [], folders: [], folderTombstones: ["f1", "f2"] },
+      patch: () => vi.mocked(ipc.deleteFolderIfEmpty).mockRejectedValueOnce(new Error("directory temporarily busy")),
+    });
+    expect(api.createFolder).not.toHaveBeenCalled();
+    expect(disk.folders.has("Team")).toBe(true);
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+    vi.mocked(ipc.getVaultConfig).mockResolvedValue(writes[writes.length - 1][0]);
+    const restarted = new VaultRegistry(api);
+    restarted.setInboundHost(recordingHost().host);
+    await restarted.reconcile({ organizationId: ORG, vaultName: "v" });
+    expect(api.createFolder).not.toHaveBeenCalled();
+    expect(disk.folders.has("Team")).toBe(false);
+  });
+
+  it("re-registers a deleted folder whose removal failed once the user adds a note to it", async () => {
+    const disk = new FakeDisk();
+    disk.folders.add("Team");
+    const { api, reg } = await twoPasses({
+      disk,
+      first: { notes: [], folders: [{ id: "f1", path: "Team" }] },
+      then: { notes: [], folders: [], folderTombstones: ["f1"] },
+      // A lasting I/O failure (Windows lock, EACCES): every removal throws.
+      patch: () => vi.mocked(ipc.deleteFolderIfEmpty).mockRejectedValue(new Error("access denied")),
+    });
+    expect(api.createFolder).not.toHaveBeenCalled();
+    // The user writes a note into the folder the teammate deleted.
+    disk.notes.set("Team/new.md", "local");
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+    expect(api.createFolder).toHaveBeenCalledWith(expect.objectContaining({ path: "Team" }));
+    expect(api.createNote).toHaveBeenCalledWith(expect.objectContaining({ relPath: "Team/new.md" }));
+    // Once kept, the folder is no longer a pending removal.
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+    const cfg = JSON.parse(writes[writes.length - 1][0] as string);
+    expect(cfg.revokedFolders?.Team).toBeUndefined();
+  });
+
   it("removes an emptied local folder the server deleted and does not re-register it", async () => {
     // THE reappearing-folder bug, end to end: without a tombstone this device
     // saw "missing from the server" and re-registered the folder, resurrecting
@@ -1585,7 +1630,7 @@ describe("a revoked tree binary leaves the disk like a revoked note", () => {
   // had no route at all, because they are in none of the listings the note plan
   // reads.
 
-  it("removes a named, access-checked binary outright and forgets its files row", async () => {
+  it("moves a named, access-checked binary to recovery and forgets its files row", async () => {
     const disk = new FakeDisk();
     disk.notes.set("a.md", "d1");
     disk.binaries.add("Team/report.pdf");
@@ -1599,15 +1644,73 @@ describe("a revoked tree binary leaves the disk like a revoked note", () => {
     });
 
     expect(disk.binaries.has("Team/report.pdf")).toBe(false);
-    expect(disk.deleted).toEqual(["Team/report.pdf"]);
-    expect(disk.trashed).toEqual([]);
+    expect(disk.deleted).toEqual([]);
+    expect(disk.trashed).toEqual([{ from: "Team/report.pdf", to: expect.stringContaining(".context/trash/") }]);
     // The note beside it is untouched: the binary pass reads `localFiles` only.
     expect(disk.notes.has("a.md")).toBe(true);
-    expect(r.filesRemoved).toEqual([{ path: "Team/report.pdf", trashedTo: null }]);
+    expect(r.filesRemoved).toEqual([{ path: "Team/report.pdf", trashedTo: disk.trashed[0].to }]);
     // The mapping goes with the file, or the next `hello` re-announces an id
     // whose file is not here and the server names it revoked on every connect.
     expect(r.reg.getFileId("Team/report.pdf")).toBeNull();
     expect(r.reg.fileDocIds()).toEqual([]);
+    expect(reconcileReport.items()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "keptLocally", docId: "file-1", detail: disk.trashed[0].to }),
+    ]));
+  });
+
+  it("forgets the files row even when the vault changes after the binary was trashed", async () => {
+    const disk = new FakeDisk();
+    disk.notes.set("a.md", "d1");
+    disk.binaries.add("Team/report.pdf");
+    let paused = false;
+    const original = VaultRegistry.prototype.setInboundHost;
+    const spy = vi.spyOn(VaultRegistry.prototype, "setInboundHost").mockImplementation(function (
+      this: VaultRegistry,
+      host,
+    ) {
+      return original.call(this, host ? { ...host, structurePaused: () => paused } : host);
+    });
+    try {
+      const r = await twoPasses({
+        disk,
+        first: { notes: [{ id: "d1", rel_path: "a.md" }] },
+        then: { notes: [{ id: "d1", rel_path: "a.md" }], tombstones: [] },
+        authority: true,
+        files: { "Team/report.pdf": "file-1" },
+        named: new Set(["file-1"]),
+        patch: () => {
+          const trash = vi.mocked(ipc.trashNote).getMockImplementation()!;
+          vi.mocked(ipc.trashNote).mockImplementation((async (...a: Parameters<typeof trash>) => {
+            const out = await trash(...a);
+            paused = true; // the vault changed while the move was in flight
+            return out;
+          }) as never);
+        },
+      });
+      expect(disk.binaries.has("Team/report.pdf")).toBe(false);
+      expect(r.reg.getFileId("Team/report.pdf")).toBeNull();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("leaves the binary and its identity when recovery storage cannot be written", async () => {
+    const disk = new FakeDisk();
+    disk.notes.set("a.md", "d1");
+    disk.binaries.add("report.pdf");
+    const r = await twoPasses({
+      disk,
+      first: { notes: [{ id: "d1", rel_path: "a.md" }] },
+      then: { notes: [{ id: "d1", rel_path: "a.md" }], tombstones: [] },
+      authority: true,
+      files: { "report.pdf": "file-1" },
+      named: new Set(["file-1"]),
+      patch: () => { vi.mocked(ipc.trashNote).mockRejectedValue(new Error("disk full")); },
+    });
+    expect(disk.binaries.has("report.pdf")).toBe(true);
+    expect(disk.deleted).toEqual([]);
+    expect(r.reg.getFileId("report.pdf")).toBe("file-1");
+    expect(r.filesRemoved).toEqual([]);
   });
 
   it("claims the watcher echo first, so the delete queue never sees it", async () => {
@@ -1714,7 +1817,7 @@ describe("a revoked tree binary leaves the disk like a revoked note", () => {
     expect(disk.binaries.has("Team/report.pdf")).toBe(true);
   });
 
-  it("permanently removes the uploader's revoked binary too", async () => {
+  it("preserves the uploader's revoked binary in recovery too", async () => {
     const disk = new FakeDisk();
     disk.notes.set("mine.md", "d1");
     disk.binaries.add("Team/report.pdf");
@@ -1740,9 +1843,9 @@ describe("a revoked tree binary leaves the disk like a revoked note", () => {
     await reg.reconcile({ organizationId: ORG, vaultName: "v" });
 
     expect(disk.binaries.has("Team/report.pdf")).toBe(false);
-    expect(disk.trashed).toEqual([]);
-    expect(disk.deleted).toEqual(["Team/report.pdf"]);
-    expect(host.filesRemoved).toEqual([{ path: "Team/report.pdf", trashedTo: null }]);
+    expect(disk.deleted).toEqual([]);
+    expect(disk.trashed).toEqual([{ from: "Team/report.pdf", to: expect.stringContaining(".context/trash/") }]);
+    expect(host.filesRemoved).toEqual([{ path: "Team/report.pdf", trashedTo: disk.trashed[0].to }]);
   });
 
   it("keeps a binary whose bytes this device never confirmed upstream", async () => {
@@ -2404,6 +2507,33 @@ describe("offline reconciliation — ready.tombstones", () => {
 });
 
 describe("access grants", () => {
+  it("does not call a note created during a slow listing an access grant", async () => {
+    const clock = vi.spyOn(Date, "now");
+    const started = Date.parse("2026-10-01T10:00:00Z");
+    clock.mockReturnValue(started);
+    try {
+      const disk = new FakeDisk();
+      install(disk);
+      const state: ServerState = { notes: [], tombstones: [] };
+      const api = fakeApi(state);
+      const list = api.listNoteRegistryPaged.bind(api);
+      vi.mocked(api.listNoteRegistryPaged).mockImplementationOnce(async (...args) => {
+        const result = await list(...args);
+        clock.mockReturnValue(started + 30_000);
+        return result;
+      });
+      const reg = new VaultRegistry(api);
+      const grants: unknown[] = [];
+      const host = recordingHost();
+      host.host.accessGranted = (event) => grants.push(event);
+      reg.setInboundHost(host.host);
+      await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+      state.notes = [{ id: "new", rel_path: "new.md", created_at: new Date(started + 10_000).toISOString() } as ServerState["notes"][number]];
+      await reg.pull();
+      expect(grants).toEqual([]);
+    } finally { clock.mockRestore(); }
+  });
+
   it("the first pull fires nothing; a later pull adding two readable notes fires once with count 2", async () => {
     const disk = new FakeDisk();
     disk.notes.set("a.md", "d1");

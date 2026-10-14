@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { DEFAULT_SERVER_URL } from "../lib/api";
 import type { AccountSettingsTab } from "../lib/settingsTabs";
 import { authManager } from "../lib/auth/authManager";
+import { readRecentServers, switchServer } from "../lib/auth/recentServers";
 import { normalizeServerUrl, serverHost } from "../lib/auth/serverChoice";
 import {
   ACTIVITY_STATUSES,
@@ -602,12 +603,19 @@ function NotificationsTab() {
 
 function ConnectionTab() {
   const serverUrl = useStore((s) => s.serverUrl);
+  const addressInput = useRef<HTMLInputElement>(null);
   const [draft, setDraft] = useState(serverUrl);
+  const [recent, setRecent] = useState(readRecentServers);
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => setDraft(serverUrl), [serverUrl]);
+  useEffect(() => {
+    setDraft(serverUrl);
+    // Read only: opening the tab must not reorder the history. Recents are
+    // recorded by a switch that actually landed (`switchServer`).
+    setRecent(readRecentServers());
+  }, [serverUrl]);
 
   /**
    * Check the address answers BEFORE adopting it. Changing the server is a
@@ -615,6 +623,10 @@ function ConnectionTab() {
    * typo used to swap a working session for a signed-out app and no message at
    * all — `save` had a `finally` and no `catch`.
    */
+  // Compare the normalized address, so "https://x.example/" still selects
+  // its recent entry instead of the placeholder.
+  const draftUrl = normalizeServerUrl(draft);
+
   const save = async () => {
     const url = normalizeServerUrl(draft);
     if (!url) {
@@ -626,8 +638,17 @@ function ConnectionTab() {
     setError(null);
     try {
       await authManager.api.health(url);
-      writeServerChoice(url === DEFAULT_SERVER_URL ? "managed" : "custom");
-      await useStore.getState().setServerUrl(url);
+      // Another flow (an invite link's Connect, a sign-in) can take the switch
+      // over; then nothing was saved here, so say nothing. The managed/custom
+      // choice is written only once the switch landed.
+      const switched = await switchServer(url, {
+        switchTo: (next) => useStore.getState().setServerUrl(next),
+        writeChoice: writeServerChoice,
+        defaultUrl: DEFAULT_SERVER_URL,
+        previousUrl: serverUrl,
+      });
+      if (!switched) return;
+      setRecent(readRecentServers());
       setSaved(true);
       window.setTimeout(() => setSaved(false), 2500);
     } catch (e) {
@@ -639,10 +660,47 @@ function ConnectionTab() {
 
   return (
     <div className="connection-tab">
+      <p className="field-hint">
+        One server is active at a time. Switching pauses sync with the previous
+        server. Choose a vault on the new server to resume syncing.
+      </p>
+      {recent.length > 0 && (
+        <label className="field">
+          <span className="field-label">Recent connections</span>
+          <select
+            value={draftUrl && recent.includes(draftUrl) ? draftUrl : ""}
+            disabled={busy}
+            onChange={(e) => { setDraft(e.target.value); setSaved(false); setError(null); }}
+          >
+            <option value="" disabled>Choose a recent server</option>
+            {recent.map((url) => (
+              <option key={url} value={url}>
+                {serverHost(url)}{url === serverUrl ? " (active)" : ""}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+      <div className="update-actions">
+        <button
+          className="secondary sm"
+          disabled={busy}
+          onClick={() => {
+            setDraft("");
+            setSaved(false);
+            setError(null);
+            addressInput.current?.focus();
+          }}
+        >
+          Add server
+        </button>
+      </div>
       <label className="field">
         <span className="field-label">Server URL</span>
         <input
+          ref={addressInput}
           value={draft}
+          disabled={busy}
           onChange={(e) => setDraft(e.target.value)}
           placeholder="https://notes.example.com"
           spellCheck={false}
@@ -658,7 +716,7 @@ function ConnectionTab() {
       <div className="update-actions">
         <button
           className="primary sm"
-          disabled={busy || draft.trim() === serverUrl}
+          disabled={busy || !draft.trim() || normalizeServerUrl(draft) === serverUrl}
           onClick={() => void save()}
         >
           {busy && <span className="btn-spinner" aria-hidden="true" />}

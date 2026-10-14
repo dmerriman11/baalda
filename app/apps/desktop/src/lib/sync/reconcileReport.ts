@@ -10,7 +10,7 @@ export type ReconcileKind =
   | "restoredFromServer" // D5/D8: a file missing locally was re-materialised from the server (B's closed-app delete undone)
   | "deletedByTeammate" // D1: a teammate deleted a note B had unseen edits to; B's version went to trash (local and/or server)
   | "renamedConflict" // D4: same-path create; B's later note renamed to newPath
-  | "keptLocally" // D7: access revoked while B had unsent edits; kept under .context/trash, no longer synced
+  | "keptLocally" // Access revoked: unsent note edits or attachment bytes kept under .context/trash, no longer synced
   | "selfRevoked" // D7, but B removed their OWN access from this device moments before; same copy, quiet notice
   | "folderKept" // D8: teammate deleted a folder but B's new notes inside it kept it alive
   | "externalEditSaved" // another app edited a never-opened note offline; the server's text won, the file went to trash (detail = trash path)

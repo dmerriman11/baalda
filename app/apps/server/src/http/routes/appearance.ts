@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { setAuditActor } from "../../audit/access.js";
 import { randomUUID } from "node:crypto";
 import { nextAccessRevision, type AccessChangeDeps } from "../../permissions/access-management.js";
 import { createResolverCache, effectivePermission } from "../../permissions/resolver.js";
@@ -122,6 +123,7 @@ export function createAppearanceRoutes(deps: AccessChangeDeps = {}): Hono {
     let protectedHome: { vaultId: string; docId: string } | undefined;
     try {
       await db.query("BEGIN");
+      await setAuditActor(db, session.userId);
       const homeDocId = parsed.settings.homeDocId;
       if (homeDocId) {
         // Share access and the Home pointer commit together under the ordinary

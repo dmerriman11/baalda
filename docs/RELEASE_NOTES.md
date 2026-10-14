@@ -21,6 +21,8 @@
     (every app still installs it). Ask before each release: silent, or notes?
 -->
 
+## 0.1.84
+
 ## 0.1.83
 
 - Introducing dashboards: a visual layer for your second brain. Turn your notes into a home for projects, plans, and the things you want to keep in view.

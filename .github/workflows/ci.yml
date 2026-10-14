@@ -1,21 +1,22 @@
 name: ci
 
-# Runs the full test suite on every push and PR so the vault sync engine
-# (spec 05) and the rest of the app stay verified. Desktop TS tests are pure
+# Runs the full test suite once when changes land on staging. PR events and
+# production promotion do not duplicate this run. Desktop TS tests are pure
 # Node; server tests run against a throwaway Postgres service and migrate
 # themselves via the test harness (resetDb → runMigrations).
 on:
   push:
-    # `staging` is here for the same reason `main` is: a push to it ships an
-    # installable app (.github/workflows/staging-release.yml), so the suite has
-    # to have run against that exact commit. PRs are covered by `pull_request`
-    # whatever branch they target, but a fast-forward or a direct push to
-    # `staging` is not a PR.
-    branches: [main, staging, develop]
-  pull_request:
+    branches: [staging]
   workflow_dispatch:
 
 jobs:
+  compose-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check default and optional MinIO Compose configurations
+        run: python3 scripts/test-compose-config.py
+
   test:
     runs-on: ubuntu-latest
     defaults:

@@ -119,8 +119,14 @@ header specified in `CONTRIBUTING.md`.
 
 ## Branches and repository boundaries
 
-- Feature PRs target `staging`. Inspect the working tree before switching branches
-  and preserve unrelated user changes.
+- After review and relevant checks, merge or commit authorized changes directly
+  to `staging`; do not create staging PRs unless explicitly requested. Existing
+  PRs targeting `staging` can be reviewed and merged. Inspect the working tree
+  before switching branches and preserve unrelated user changes. Production
+  promotion remains a separate action and requires explicit authorization.
+- CI tests run automatically on pushes to `staging`, not on PR events or again
+  on production promotion (manual dispatch remains available). Run relevant
+  local checks before pushing; staging pushes also build the rolling prerelease.
 - Use the repository's configured author identity for commits and pull requests.
   Do not add AI/tool attribution, generated-by text, or co-author trailers.
 - Every push to `staging` triggers a rolling staging prerelease. Production

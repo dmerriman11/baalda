@@ -189,6 +189,10 @@ Pure TS with dependency-injected I/O so it runs under vitest in Node. `adapter.t
 
 ### Desktop — sync (`src/lib/sync/`)
 - `docSession.ts` (`syncManager`) — owns the registry, current `DocSync`, presence, attachments.
+  Each sync lifetime gets a fresh `VaultRegistry`; teardown permanently retires the previous one.
+  Never rebind a retired registry: suspended requests must retain the old scope and cannot write
+  another vault's files, identity map, baseline, progress, or selection. Flush the editor before
+  switching the vault epoch, and gate late note-open completions on that epoch.
 - `syncManager.ts` (`DocSync`) — `HocuspocusProvider` over the bridge's `Y.Doc`; doc name
   `vault:<vaultId>/note:<docId>`. Token is a **function** re-minted per (re)connect via `POST /api/sync-token`;
   403 → `no-access`. WS URL derived from the server URL (`deriveWsUrl`): ALWAYS same-origin

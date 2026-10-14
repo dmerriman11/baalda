@@ -233,7 +233,8 @@ describe("site 4 — pushing note CONTENT", () => {
   });
 
   it("…and `enable`'s own bulk engine, which had it first", () => {
-    expect(source).toContain("useBulkPath(this.registry.mappedNotes().length)");
+    const enable = source.slice(source.indexOf("async enable("), source.indexOf("private teardown("));
+    expect(enable).toContain("useBulkPath(registry.mappedNotes().length)");
   });
 });
 

@@ -24,6 +24,8 @@ const COLLECTION = "collection-1";
 const fakeRegistry = vi.hoisted(() => {
   const reg = {
     vaultId: null as string | null,
+    // Not a Windows host: nothing is skipped (`windowsPaths.ts`).
+    unmaterializable: { skip: () => false, skipShadow: () => false },
     notes: [] as Array<{ docId: string; relPath: string }>,
     pushedSet: new Set<string>(),
     resume: null as unknown,

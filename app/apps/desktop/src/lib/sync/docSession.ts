@@ -35,6 +35,7 @@ import { viewingDocId } from "../presence/viewingDocId";
 import type { ActivityStatus } from "../prefs";
 import { toast } from "../toast";
 import { AttachmentSync, routesToAttachmentSync } from "./attachments";
+import { applySkippingUnsafe } from "./windowsPaths";
 import { EmbedArrivalFetcher } from "./embedArrival";
 import { BinaryDeleteQueue } from "./binaryDeletes";
 import { BootstrapRunner } from "./bootstrap";
@@ -281,6 +282,30 @@ export const REGISTRY_FRAME_PULL_MIN_GAP_MS = 2_000;
 const GAP_DELAYED_PULL_REASONS: ReadonlySet<RegistryPullReason> = new Set<RegistryPullReason>([
   "registry-frame",
   "meta-frame",
+]);
+
+/**
+ * The idle-pull brake (defence in depth against a client-local loop). After
+ * {@link REGISTRY_PULL_BRAKE_AFTER} consecutive pulls that changed nothing, a
+ * locally-caused re-arm (watcher, reauth, a retry) waits 2 s → 4 s → … → 30 s
+ * after the last pull ended instead of 250ms. A watcher batch with a real file
+ * change waits at most 2 s so a new local file still registers promptly;
+ * folder-only batches take the full backoff. Teammate frames and
+ * user actions are not braked; any pull that changes something releases it.
+ */
+export const REGISTRY_PULL_BRAKE_AFTER = 3;
+export const REGISTRY_PULL_BRAKE_MAX_MS = 30_000;
+const REGISTRY_PULL_BRAKE_BASE_MS = 2_000;
+const BRAKED_PULL_REASONS: ReadonlySet<RegistryPullReason> = new Set<RegistryPullReason>([
+  "watcher",
+  "reauth",
+  "register-failed",
+]);
+const USER_PULL_REASONS: ReadonlySet<RegistryPullReason> = new Set<RegistryPullReason>([
+  "delete-restore",
+  "delete-confirmed",
+  "revert",
+  "shared-navigation",
 ]);
 
 /**
@@ -548,6 +573,9 @@ export class SyncManager implements InboundHost {
   /** A frame-driven pull asked for while one was running: armed (with the
    *  gap) the moment the running pull ends. */
   private registryPullTrailing = false;
+  /** Consecutive completed pulls that changed nothing (the idle-pull brake). */
+  private registryPullIdleStreak = 0;
+  private registryPullBrakeLogged = false;
   /** The deferred meta-only pull, if one is waiting. At most one. */
   private metaPullTimer: ReturnType<typeof setTimeout> | null = null;
   /** UI subscribes here to refetch the Activity feed when the server says the
@@ -1574,7 +1602,7 @@ export class SyncManager implements InboundHost {
    * Public like `handleAttachmentChanged` — both are "an external signal for this
    * vault arrived"; the vault engine wires this one in `startVaultEngine`.
    */
-  handleRegistryChanged(reason: RegistryPullReason): void {
+  handleRegistryChanged(reason: RegistryPullReason, opts?: { fileChange?: boolean }): void {
     // A reconnect, a registry frame or an ACL change may mean the server now
     // holds an embed this device is still waiting for: ask for it now.
     this.embedArrivals?.nudge();
@@ -1594,7 +1622,7 @@ export class SyncManager implements InboundHost {
     // "the server told us the structure moved" from "the server told us to
     // re-mint a token, and we pulled anyway" in #93.
     console.info(`[sync] registry pull requested (${reason})`);
-    this.armRegistryPull(reason);
+    this.armRegistryPull(reason, opts?.fileChange === true);
   }
 
   /**
@@ -1602,7 +1630,13 @@ export class SyncManager implements InboundHost {
    * {@link handleRegistryChanged} so the trailing pull a running one owes can
    * re-arm without repeating that method's side effects and log line.
    */
-  private armRegistryPull(reason: RegistryPullReason): void {
+  /** A pull, teammate change or user action changed something: full speed again. */
+  private releasePullBrake(): void {
+    this.registryPullIdleStreak = 0;
+    this.registryPullBrakeLogged = false;
+  }
+
+  private armRegistryPull(reason: RegistryPullReason, fileChange = false): void {
     // A signal that arrives once sync is down (or for the vault we just left) must
     // not even ARM the timer — an armed timer is the thing that outlived the switch
     // in the first place. Requiring a live, current scope is strictly stronger than
@@ -1613,9 +1647,25 @@ export class SyncManager implements InboundHost {
     const gapDelayed = GAP_DELAYED_PULL_REASONS.has(reason);
     // A teammate's frame waits until the last pull ended at least
     // REGISTRY_FRAME_PULL_MIN_GAP_MS ago; everything else keeps the 250ms path.
-    const delay = gapDelayed
+    let delay = gapDelayed
       ? Math.max(250, this.registryPullEndedAt + REGISTRY_FRAME_PULL_MIN_GAP_MS - now)
       : 250;
+    if (USER_PULL_REASONS.has(reason)) this.releasePullBrake();
+    const idle = this.registryPullIdleStreak;
+    if (BRAKED_PULL_REASONS.has(reason) && idle >= REGISTRY_PULL_BRAKE_AFTER) {
+      let wait = Math.min(
+        REGISTRY_PULL_BRAKE_MAX_MS,
+        REGISTRY_PULL_BRAKE_BASE_MS * 2 ** Math.min(idle - REGISTRY_PULL_BRAKE_AFTER, 8),
+      );
+      // A watcher batch holding a real file change stays within ~2 s; a
+      // folder-only batch (a self-echo's shape) takes the full backoff.
+      if (reason === "watcher" && fileChange) wait = Math.min(wait, REGISTRY_PULL_BRAKE_BASE_MS);
+      delay = Math.max(delay, this.registryPullEndedAt + wait - now);
+      if (!this.registryPullBrakeLogged) {
+        this.registryPullBrakeLogged = true;
+        console.warn(`[sync] ${idle} registry pulls in a row changed nothing; slowing ${reason} pulls`);
+      }
+    }
     const dueAt = now + delay;
     if (this.registryPullTimer) {
       // Already armed. Re-arming is the coalescing, but only up to a point: past
@@ -1680,6 +1730,8 @@ export class SyncManager implements InboundHost {
           // other half is the channel reaching `synced`). Until both hold, a
           // missing file is a disk that isn't ready, not a delete.
           this.pulledOnce = true;
+          if (changed) this.releasePullBrake();
+          else this.registryPullIdleStreak++;
           this.markLive();
           this.maybeNoticeClosedChanges();
           // Only poke the sidebar when the pull actually changed something it
@@ -2213,6 +2265,10 @@ export class SyncManager implements InboundHost {
     // used to re-enter `handleRegistryChanged` 200 times per batch — 200 timer
     // teardowns for the single pull that was always going to happen.
     let pullRegistry = false;
+    // A real file (note or tree binary) asked for the pull, not only a folder
+    // `tree` event (which is what a self-echo looks like): kept responsive
+    // under the idle-pull brake.
+    let pullFileChange = false;
     let queuedDelete = false;
     // REMOVALS FIRST, in their own pass. The watcher sorts a batch by path, so
     // whether a rename's `removed` half arrives before its `modified` half is
@@ -2313,6 +2369,7 @@ export class SyncManager implements InboundHost {
           queuedDelete = true; // hold the pull until the drain has decided
         }
         pullRegistry = true;
+        pullFileChange = true; // a real file, not a folder echo
         continue;
       }
       // Belt and braces with the uploader's own `skip`: the open note's editor
@@ -2371,7 +2428,7 @@ export class SyncManager implements InboundHost {
       // rename as a brand-new note — a second doc_id for the same file, and a
       // 0-byte ghost materialized back at the old path. The drain re-arms it.
       if (queuedDelete) this.pullAfterDiskDeletes = true;
-      else this.handleRegistryChanged("watcher");
+      else this.handleRegistryChanged("watcher", { fileChange: pullFileChange });
     }
   }
 
@@ -5498,7 +5555,14 @@ export class SyncManager implements InboundHost {
           api.fetchBootstrapPage(vaultId, sessionId, { cursor }),
         // ONE IPC (and one SQLite transaction) per page. Rust decides each doc's
         // fate from the FILE and the local CRDT tables, never from this list.
-        applyBatch: (entries) => ipc.applyBootstrapBatch(entries, scope.vaultEpoch),
+        // Never a path this OS cannot hold (`windowsPaths.ts`): Win32 would
+        // strip it and write the note under a folder the server never had.
+        applyBatch: (entries) =>
+          applySkippingUnsafe(
+            entries,
+            (safe) => ipc.applyBootstrapBatch(safe, scope.vaultEpoch),
+            registry.unmaterializable,
+          ),
         // A doc that already has local CRDT: merge it the normal cold way, which
         // is what makes re-running a page free.
         coldApply: (docId, update) => store.applyUpdate(docId, update),
@@ -6294,6 +6358,7 @@ export class SyncManager implements InboundHost {
     this.registryPullGapOnly = false;
     this.registryPullsInFlight = 0;
     this.registryPullEndedAt = 0;
+    this.releasePullBrake();
     this.registryPullTrailing = false;
     if (this.metaPullTimer) {
       clearTimeout(this.metaPullTimer);
@@ -6641,7 +6706,12 @@ export class SyncManager implements InboundHost {
     this.onVaultStatus?.("connecting");
     if (!this.current) this.emitStatus();
     const store = new VaultDocStore({
-      resolvePath: (docId) => this.registry.pathForDocId(docId),
+      // A path this OS cannot hold is no path at all: the cold apply parks the
+      // update and drops it after the pull instead of writing a stripped name.
+      resolvePath: (docId) => {
+        const p = this.registry.pathForDocId(docId);
+        return p && this.registry.unmaterializable.skip(p) ? null : p;
+      },
       // The background feed writes .md files for docs nobody has open. Pin its
       // IO to this vault's epoch so a cold apply that lands after a vault switch
       // is refused by Rust instead of overwriting the new vault's file at the
@@ -6691,7 +6761,12 @@ export class SyncManager implements InboundHost {
         const sv = await createDeferredWithContent(
           {
             deferredPathFor: (id) => this.registry.deferredPathFor?.(id) ?? null,
-            applyBatch: (entries) => ipc.applyBootstrapBatch(entries, scope.vaultEpoch),
+            applyBatch: (entries) =>
+              applySkippingUnsafe(
+                entries,
+                (safe) => ipc.applyBootstrapBatch(safe, scope.vaultEpoch),
+                this.registry.unmaterializable,
+              ),
             markMaterialized: (relPath) => this.registry.markMaterialized(relPath),
             markPushed: (id) => {
               this.registry.markPushed(id);

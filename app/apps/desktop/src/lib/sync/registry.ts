@@ -21,6 +21,7 @@
 //   • honest — a per-item failure is retried with backoff and then RECORDED
 //     (`failures()`), so a vault with failures can never report fully synced.
 
+import { UnmaterializablePaths, isWindowsHost, strippedServerIndex, windowsStrip } from "./windowsPaths";
 import { markAccessTreeStale } from "../accessTreeStale";
 import {
   ACCESS_CHECK_MAX,
@@ -691,6 +692,13 @@ function samePathConflictCap(listed: number): number {
  *  list and the ones in `inbound.ts` and Rust `vault.rs` are what
  *  `__tests__/formatsLockstep.test.ts` compares against the registry, and a
  *  list that imports its own answer cannot drift — nor can it detect drift. */
+
+/** Echo-match key: how the OS may hand back a path we wrote (case, NFC, and on
+ *  Windows stripped trailing dots/spaces). Compare-time only. */
+function echoKey(relPath: string): string {
+  return pathKey(isWindowsHost() ? windowsStrip(relPath) : relPath);
+}
+
 const NOTE_EXTS = ["md", "markdown", "mdx", "txt", "html", "htm", "canvas", "url", "webloc"];
 function isNoteFile(path: string): boolean {
   const ext = path.slice(path.lastIndexOf(".") + 1).toLowerCase();
@@ -1089,6 +1097,16 @@ export class VaultRegistry {
    * first event that arrives for it.
    */
   private materialized = new Set<string>();
+  /** {@link materialized} by `echoKey`, so an OS-respelled echo matches in O(1). */
+  private materializedByKey = new Map<string, string>();
+  /**
+   * Server paths this OS cannot hold as spelled (Windows: trailing dot/space,
+   * reserved device names, forbidden characters, MAX_PATH). Skipped by the
+   * inbound folder and materialize steps with one warning per path per session,
+   * never retried: creating them either fails on every pull or lands under a
+   * stripped name the watcher reports back as a new folder (`windowsPaths.ts`).
+   */
+  unmaterializable = new UnmaterializablePaths();
   /**
    * Paths the same-path conflict step ({@link resolveSamePathConflicts}) just
    * moved a local file away from or onto, with the time it did so.
@@ -1396,6 +1414,7 @@ export class VaultRegistry {
     // Paths, so they belong to the vault we are leaving — and a stale entry would
     // suppress the next vault's first watcher event for the same relative path.
     this.materialized.clear();
+    this.materializedByKey.clear();
     this.ownMoves.clear();
     this.ownDeletes.clear();
     this.unhydratedPlaceholders.clear();
@@ -1495,7 +1514,16 @@ export class VaultRegistry {
    * path (a real external edit) is treated normally.
    */
   consumeMaterialized(relPath: string): boolean {
-    return this.materialized.delete(relPath);
+    if (this.materialized.delete(relPath)) {
+      this.materializedByKey.delete(echoKey(relPath));
+      return true;
+    }
+    // The OS may report our write under its own spelling: another case, NFD on
+    // macOS, or (Windows) trailing dots/spaces stripped. Still our echo.
+    const original = this.materializedByKey.get(echoKey(relPath));
+    if (original === undefined || !this.materialized.delete(original)) return false;
+    this.materializedByKey.delete(echoKey(relPath));
+    return true;
   }
 
   /**
@@ -1511,8 +1539,12 @@ export class VaultRegistry {
     // window, the vault was closed) would otherwise pin the entry forever. A
     // vault's worth of placeholders is the natural high-water mark, so a set an
     // order of magnitude past that is stale by definition.
-    if (this.materialized.size > 20_000) this.materialized.clear();
+    if (this.materialized.size > 20_000) {
+      this.materialized.clear();
+      this.materializedByKey.clear();
+    }
     this.materialized.add(relPath);
+    this.materializedByKey.set(echoKey(relPath), relPath);
     this.clearPendingPath(relPath);
   }
 
@@ -2643,6 +2675,7 @@ export class VaultRegistry {
       // a NEW folder once the own-delete window closed: deleted folders came back
       // empty, for the whole team.
       if (this.isOwnDelete(path)) continue;
+      if (this.unmaterializable.skip(path)) continue;
       try {
         // Only a directory this call actually created is a disk change — and it
         // is OUR change, so its watcher echo is remembered and consumed rather
@@ -2665,6 +2698,8 @@ export class VaultRegistry {
 
     for (const move of plan.renames) {
       if (this.stopRun()) break;
+      // A destination this OS cannot hold (Windows): keep the old local path.
+      if (this.unmaterializable.skip(move.to)) continue;
       // Nothing may still hold the old path when we move it.
       await this.host?.releaseDoc(move.docId);
       if (this.stale()) return { changedDisk, suppress: plan.suppress };
@@ -4187,9 +4222,16 @@ export class VaultRegistry {
         if (serverFolderByPathCi.has(key) || !onDiskCi.has(key)) this.hiddenPaths.delete(key);
       }
     }
+    // Windows: a local `X` that is this disk's spelling of server `X.` (or
+    // anything under it) is that server item materialized, never a new one.
+    const strippedServer = strippedServerIndex([
+      ...serverFolders.map((f) => f.path),
+      ...serverNotes.map((n) => noteRelPath(n)).filter((p): p is string => !!p),
+    ]);
     const missingFolders = folders.filter(
       (f) =>
         !this.folderByPath.has(f.path) &&
+        !this.unmaterializable.skipShadow(f.path, strippedServer) &&
         !deadFolderIds.has(this.revokedFolders.get(f.path) ?? "") &&
         !this.hiddenPaths.has(pathKey(f.path)) &&
         !this.isOwnDelete(f.path) &&
@@ -4279,6 +4321,7 @@ export class VaultRegistry {
     let missingNotes = notes.filter(
       (n) =>
         !resolvedNotePathsCi.has(pathKey(n.path)) &&
+        !this.unmaterializable.skipShadow(n.path, strippedServer) &&
         !this.inboundSuppressed.has(n.path) &&
         !this.aliasPaths.has(n.path) &&
         !this.hiddenPaths.has(pathKey(n.path)) &&
@@ -4608,6 +4651,8 @@ export class VaultRegistry {
       // just deleted in-app must not come back as a placeholder, which would
       // also re-create its deleted parent folders on disk.
       if (this.isOwnDelete(rp)) return false;
+      // A name this OS cannot hold (Windows): never a placeholder, never a retry.
+      if (this.unmaterializable.skip(rp)) return false;
       if (held && held.size > 0) {
         const docId = this.byPath.get(rp)?.docId;
         if (docId && held.has(docId)) return false;

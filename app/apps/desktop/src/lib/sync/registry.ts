@@ -1670,6 +1670,13 @@ export class VaultRegistry {
    *  a path re-used later registers afresh instead of adopting a dead id. */
   forgetFileId(relPath: string): void {
     if (this.stale()) return;
+    this.dropFileId(relPath);
+  }
+
+  /** {@link forgetFileId} without the vault-change guard, for a caller that has
+   *  ALREADY removed this vault's file: the id must not outlive its bytes even
+   *  when the vault changed during the removal. `persist` still refuses then. */
+  private dropFileId(relPath: string): void {
     const id = this.fileByPath.get(relPath);
     if (!this.fileByPath.delete(relPath)) return;
     // The row is gone, so the claim about its bytes goes with it. Leaving it
@@ -2400,12 +2407,14 @@ export class VaultRegistry {
         if (await ipc.binaryExists(gone.path, this.epoch())) throw e;
         trashedTo = null;
       }
-      if (this.stale()) return false;
       // The row is gone for us, so the mapping goes with it — otherwise the next
       // `hello` re-announces an id whose file is not here, the server names it
       // revoked again, and the ACL-authority clock is re-stamped on every
-      // reconnect for a removal that already happened.
-      this.forgetFileId(gone.path);
+      // reconnect for a removal that already happened. BEFORE the vault-change
+      // return: the file has already left this vault's disk, and this registry
+      // is that vault's, so a switch mid-await must not strand the id.
+      this.dropFileId(gone.path);
+      if (this.stale()) return false;
       this.authoredDocs.delete(gone.docId);
       this.host?.fileRemoved?.(gone.docId, gone.path, trashedTo);
       if (trashedTo) reconcileReport.record({

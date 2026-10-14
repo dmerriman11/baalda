@@ -118,7 +118,8 @@ export class ReadOnlyRejections {
           local = null;
         }
       }
-      if (local == null) local = await this.deps.localText(docId);
+      let crdt: string | null | undefined;
+      if (local == null) local = crdt = await this.deps.localText(docId);
       // Match the bridge's empty-write guard. A read-only recovery is not
       // authority to erase populated local content merely because the pulled
       // server document has no text (for example during an interrupted upload
@@ -126,7 +127,8 @@ export class ReadOnlyRejections {
       // a populated state arrives; the normal window bounds subsequent retries.
       if (
         server.text.length === 0 &&
-        ((local?.length ?? 0) > 0 || ((await this.deps.localText(docId))?.length ?? 0) > 0)
+        ((local?.length ?? 0) > 0 ||
+          ((crdt === undefined ? await this.deps.localText(docId) : crdt)?.length ?? 0) > 0)
       ) {
         return false;
       }

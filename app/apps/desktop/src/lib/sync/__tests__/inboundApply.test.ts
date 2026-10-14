@@ -1658,6 +1658,42 @@ describe("a revoked tree binary leaves the disk like a revoked note", () => {
     ]));
   });
 
+  it("forgets the files row even when the vault changes after the binary was trashed", async () => {
+    const disk = new FakeDisk();
+    disk.notes.set("a.md", "d1");
+    disk.binaries.add("Team/report.pdf");
+    let paused = false;
+    const original = VaultRegistry.prototype.setInboundHost;
+    const spy = vi.spyOn(VaultRegistry.prototype, "setInboundHost").mockImplementation(function (
+      this: VaultRegistry,
+      host,
+    ) {
+      return original.call(this, host ? { ...host, structurePaused: () => paused } : host);
+    });
+    try {
+      const r = await twoPasses({
+        disk,
+        first: { notes: [{ id: "d1", rel_path: "a.md" }] },
+        then: { notes: [{ id: "d1", rel_path: "a.md" }], tombstones: [] },
+        authority: true,
+        files: { "Team/report.pdf": "file-1" },
+        named: new Set(["file-1"]),
+        patch: () => {
+          const trash = vi.mocked(ipc.trashNote).getMockImplementation()!;
+          vi.mocked(ipc.trashNote).mockImplementation((async (...a: Parameters<typeof trash>) => {
+            const out = await trash(...a);
+            paused = true; // the vault changed while the move was in flight
+            return out;
+          }) as never);
+        },
+      });
+      expect(disk.binaries.has("Team/report.pdf")).toBe(false);
+      expect(r.reg.getFileId("Team/report.pdf")).toBeNull();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("leaves the binary and its identity when recovery storage cannot be written", async () => {
     const disk = new FakeDisk();
     disk.notes.set("a.md", "d1");

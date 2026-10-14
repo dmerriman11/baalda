@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { DEFAULT_SERVER_URL } from "../lib/api";
 import type { AccountSettingsTab } from "../lib/settingsTabs";
 import { authManager } from "../lib/auth/authManager";
-import { readRecentServers, rememberServer } from "../lib/auth/recentServers";
+import { readRecentServers, rememberServer, switchServer } from "../lib/auth/recentServers";
 import { normalizeServerUrl, serverHost } from "../lib/auth/serverChoice";
 import {
   ACTIVITY_STATUSES,
@@ -632,8 +632,15 @@ function ConnectionTab() {
     setError(null);
     try {
       await authManager.api.health(url);
-      writeServerChoice(url === DEFAULT_SERVER_URL ? "managed" : "custom");
-      await useStore.getState().setServerUrl(url);
+      // Another flow (an invite link's Connect, a sign-in) can take the switch
+      // over; then nothing was saved here, so say nothing. The managed/custom
+      // choice is written only once the switch landed.
+      const switched = await switchServer(url, {
+        switchTo: (next) => useStore.getState().setServerUrl(next),
+        writeChoice: writeServerChoice,
+        defaultUrl: DEFAULT_SERVER_URL,
+      });
+      if (!switched) return;
       setSaved(true);
       window.setTimeout(() => setSaved(false), 2500);
     } catch (e) {

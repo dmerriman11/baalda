@@ -72,3 +72,17 @@ it("keeps the old server, vault and vault list when the new address cannot be ad
   // The pending edits were still flushed before anything changed.
   expect(mocks.flush.mock.invocationCallOrder[0]).toBeLessThan(mocks.setServerUrl.mock.invocationCallOrder[0]);
 });
+
+it("reports a switch another auth flow took over as not saved", async () => {
+  mocks.setServerUrl.mockImplementationOnce(async () => {
+    // e.g. an invite link's Connect starts its own auth flow mid-switch.
+    useStore.setState({ authStatus: "signed-out" } as never);
+    await useStore.getState().setServerUrl("https://three.example").catch(() => {});
+    return { user: { id: "new-user", name: "New", email: "new@example.com" }, activeOrganizationId: "same-org-id" };
+  });
+  await expect(useStore.getState().setServerUrl("https://two.example")).resolves.toBe(false);
+});
+
+it("resolves true once the switch landed", async () => {
+  await expect(useStore.getState().setServerUrl("https://two.example")).resolves.toBe(true);
+});

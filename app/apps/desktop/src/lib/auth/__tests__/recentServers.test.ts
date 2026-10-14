@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { readRecentServers, rememberServer } from "../recentServers";
+import { readRecentServers, rememberServer, switchServer } from "../recentServers";
 
 let values: Map<string, string>;
 beforeEach(() => {
@@ -33,4 +33,16 @@ it("bounds history and tolerates corrupt storage", () => {
 it("does not make optional storage a connection prerequisite", () => {
   vi.stubGlobal("localStorage", { getItem() { throw Error("blocked"); }, setItem() { throw Error("blocked"); } });
   expect(rememberServer("one.example")).toEqual(["https://one.example"]);
+});
+
+it("writes the managed/custom choice only after the switch landed", async () => {
+  const writeChoice = vi.fn();
+  const deps = (switchTo: (url: string) => Promise<boolean>) => ({ switchTo, writeChoice, defaultUrl: "https://api.example" });
+  await expect(switchServer("https://self.example", deps(async () => false))).resolves.toBe(false);
+  await expect(switchServer("https://self.example", deps(async () => { throw Error("keychain"); }))).rejects.toThrow("keychain");
+  expect(writeChoice).not.toHaveBeenCalled();
+  await expect(switchServer("https://self.example", deps(async () => true))).resolves.toBe(true);
+  expect(writeChoice).toHaveBeenLastCalledWith("custom");
+  await switchServer("https://api.example", deps(async () => true));
+  expect(writeChoice).toHaveBeenLastCalledWith("managed");
 });

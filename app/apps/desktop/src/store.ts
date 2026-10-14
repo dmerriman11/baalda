@@ -776,7 +776,13 @@ interface AppStore {
    * sign-up it required). Same rules as signing in.
    */
   landAfterAuth: () => Promise<void>;
-  setServerUrl: (url: string) => Promise<void>;
+  /**
+   * Switch (or reconnect) to `url`. Resolves `true` once this switch landed,
+   * `false` when another auth flow took over meanwhile (an invite link's
+   * Connect, a sign-in) and cancelled it; throws when it failed, after putting
+   * the previous server back.
+   */
+  setServerUrl: (url: string) => Promise<boolean>;
 
   // Account profile & preferences
   /** Update display name / avatar (server-backed; refreshes the session). */
@@ -3516,7 +3522,7 @@ export const useStore = create<AppStore>((set, get) => ({
     // Persist pending edits before closing the old vault. A failed flush aborts
     // the switch so the editor still owns the unsaved buffer.
     await bridgeManager.currentBridge()?.flushEgest();
-    if (authInitGen !== gen) return;
+    if (authInitGen !== gen) return false;
     const wasSyncing = get().syncEnabled;
     // Stop syncing with the old server before the address changes. The folder
     // itself stays open until the new address is adopted, so a switch that
@@ -3541,7 +3547,7 @@ export const useStore = create<AppStore>((set, get) => ({
         billingConfig: null, orgBilling: null, myBilling: null,
       });
     }
-    if (authInitGen !== gen) return;
+    if (authInitGen !== gen) return false;
     set({
       serverUrl: authManager.getServerUrl(),
       session,
@@ -3567,6 +3573,7 @@ export const useStore = create<AppStore>((set, get) => ({
       // unrelated sign-in.
       if (peekPendingInvite()) await promptSignInForQueuedInvite(set);
     }
+    return true;
   },
 
   updateProfile: async ({ name, image }) => {

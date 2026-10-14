@@ -358,7 +358,7 @@ vi.mock("../syncManager", () => ({
 
 import type { SessionInfo } from "../../api";
 import * as ipc from "../../ipc";
-import { SyncManager } from "../docSession";
+import { REGISTRY_FRAME_PULL_MIN_GAP_MS, SyncManager } from "../docSession";
 import { vaultScopes, type SyncProgress } from "../vaultScope";
 
 function session(): SessionInfo {
@@ -1143,9 +1143,11 @@ describe("SyncManager — leftover CRDT history is reclaimed while idle", () => 
     prune.mockClear();
     storeHooks.open = OPEN_DOC;
 
-    // Two pulls a second apart: the second re-arms the same timer.
+    // Two frame-driven pulls, the second past the 2 s spacing a teammate's
+    // frame keeps after the last pull ended (so it runs on the 250ms path):
+    // the second pull re-arms the same sweep timer the first armed.
     engineHooks.opts!.onRegistryChanged?.();
-    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(REGISTRY_FRAME_PULL_MIN_GAP_MS);
     engineHooks.opts!.onRegistryChanged?.();
     await vi.advanceTimersByTimeAsync(300);
     expect(sm.hasPendingCrdtSweep()).toBe(true);

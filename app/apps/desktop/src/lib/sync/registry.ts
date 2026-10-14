@@ -21,7 +21,7 @@
 //   • honest — a per-item failure is retried with backoff and then RECORDED
 //     (`failures()`), so a vault with failures can never report fully synced.
 
-import { UnmaterializablePaths, isWindowsHost, windowsStrip } from "./windowsPaths";
+import { UnmaterializablePaths, isWindowsHost, strippedServerIndex, windowsStrip } from "./windowsPaths";
 import { markAccessTreeStale } from "../accessTreeStale";
 import {
   ACCESS_CHECK_MAX,
@@ -4222,9 +4222,16 @@ export class VaultRegistry {
         if (serverFolderByPathCi.has(key) || !onDiskCi.has(key)) this.hiddenPaths.delete(key);
       }
     }
+    // Windows: a local `X` that is this disk's spelling of server `X.` (or
+    // anything under it) is that server item materialized, never a new one.
+    const strippedServer = strippedServerIndex([
+      ...serverFolders.map((f) => f.path),
+      ...serverNotes.map((n) => noteRelPath(n)).filter((p): p is string => !!p),
+    ]);
     const missingFolders = folders.filter(
       (f) =>
         !this.folderByPath.has(f.path) &&
+        !this.unmaterializable.skipShadow(f.path, strippedServer) &&
         !deadFolderIds.has(this.revokedFolders.get(f.path) ?? "") &&
         !this.hiddenPaths.has(pathKey(f.path)) &&
         !this.isOwnDelete(f.path) &&
@@ -4314,6 +4321,7 @@ export class VaultRegistry {
     let missingNotes = notes.filter(
       (n) =>
         !resolvedNotePathsCi.has(pathKey(n.path)) &&
+        !this.unmaterializable.skipShadow(n.path, strippedServer) &&
         !this.inboundSuppressed.has(n.path) &&
         !this.aliasPaths.has(n.path) &&
         !this.hiddenPaths.has(pathKey(n.path)) &&

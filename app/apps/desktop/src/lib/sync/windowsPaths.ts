@@ -66,4 +66,83 @@ export class UnmaterializablePaths {
     }
     return true;
   }
+
+  /**
+   * Outbound twin of {@link skip}: is `localPath` the materialized form of a
+   * server item Windows had to strip? The leftover `X` beside server `X.` (a
+   * 0.1.84 build created it): registering it, or anything under it, would mint
+   * a SECOND server item for what is really the first. `index` comes from
+   * {@link strippedServerIndex}. Warns once per local path; never true off Windows.
+   */
+  skipShadow(localPath: string, index: ReadonlyMap<string, string>): boolean {
+    if (!this.windows() || index.size === 0) return false;
+    const segs = pathKeyOf(localPath).split("/");
+    for (let i = segs.length; i > 0; i--) {
+      const server = index.get(segs.slice(0, i).join("/"));
+      if (server === undefined) continue;
+      if (!this.warned.has(localPath)) {
+        this.warned.add(localPath);
+        console.warn(`[sync] not registering "${localPath}": it is this disk's spelling of server "${server}"`);
+      }
+      return true;
+    }
+    return false;
+  }
+}
+
+function pathKeyOf(p: string): string {
+  return p.normalize("NFC").toLowerCase();
+}
+
+/**
+ * Server paths whose Windows spelling differs from the server's, keyed by the
+ * stripped spelling (NFC, lower-cased, like `pathIdentity.ts pathKey`), valued
+ * by the server path. Empty off Windows-unsafe names, so the check is free.
+ */
+export function strippedServerIndex(serverPaths: Iterable<string>): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const p of serverPaths) {
+    const stripped = windowsStrip(p);
+    if (stripped === p) continue;
+    out.set(pathKeyOf(stripped), p);
+  }
+  return out;
+}
+
+/** The slice of a bootstrap entry/outcome this filter reads (`ipc.ts`). */
+interface DocEntry {
+  docId: string;
+  relPath: string;
+}
+interface DocOutcome {
+  docId: string;
+  status: string;
+  reason: string | null;
+}
+
+/**
+ * Wrap `ipc.applyBootstrapBatch` so an entry this OS cannot hold never reaches
+ * Rust: Win32 would strip `X.` to `X` and WRITE the note there, under a folder
+ * the server never had. Callers match outcomes by `docId` (`bootstrap.ts settle`,
+ * `deferredArrival.ts`), so a skipped entry answers `rejected` in place — the
+ * same verdict Rust gives a refused path — and its cold apply finds no path
+ * (the store's `resolvePath` skips it too) and writes nothing.
+ */
+export async function applySkippingUnsafe<E extends DocEntry, O extends DocOutcome>(
+  entries: E[],
+  apply: (safe: E[]) => Promise<O[]>,
+  paths: UnmaterializablePaths,
+): Promise<O[]> {
+  const safe: E[] = [];
+  const skipped: O[] = [];
+  for (const e of entries) {
+    if (paths.skip(e.relPath)) {
+      skipped.push({ docId: e.docId, status: "rejected", reason: "Windows cannot hold this name" } as O);
+    } else {
+      safe.push(e);
+    }
+  }
+  if (skipped.length === 0) return apply(entries);
+  const applied = safe.length > 0 ? await apply(safe) : [];
+  return [...applied, ...skipped];
 }

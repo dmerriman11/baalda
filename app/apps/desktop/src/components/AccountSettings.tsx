@@ -33,6 +33,7 @@ import { SettingsModal } from "./SettingsModal";
 import { SettingsCrossLink } from "./SettingsCrossLink";
 import { Switch } from "./Switch";
 import { AppearanceRows } from "./AppearanceRows";
+import { MenuSelect } from "./MenuSelect";
 import { useShallow } from "zustand/react/shallow";
 import {
   appearanceSource,
@@ -601,7 +602,7 @@ function NotificationsTab() {
   );
 }
 
-function ConnectionTab() {
+export function ConnectionTab() {
   const serverUrl = useStore((s) => s.serverUrl);
   const addressInput = useRef<HTMLInputElement>(null);
   const [draft, setDraft] = useState(serverUrl);
@@ -626,6 +627,8 @@ function ConnectionTab() {
   // Compare the normalized address, so "https://x.example/" still selects
   // its recent entry instead of the placeholder.
   const draftUrl = normalizeServerUrl(draft);
+  const selectedRecent = draftUrl && recent.includes(draftUrl) ? draftUrl : "";
+  const activeUrl = normalizeServerUrl(serverUrl);
 
   const save = async () => {
     const url = normalizeServerUrl(draft);
@@ -665,36 +668,53 @@ function ConnectionTab() {
         server. Choose a vault on the new server to resume syncing.
       </p>
       {recent.length > 0 && (
-        <label className="field">
+        <div className="field">
           <span className="field-label">Recent connections</span>
-          <select
-            value={draftUrl && recent.includes(draftUrl) ? draftUrl : ""}
-            disabled={busy}
-            onChange={(e) => { setDraft(e.target.value); setSaved(false); setError(null); }}
-          >
-            <option value="" disabled>Choose a recent server</option>
-            {recent.map((url) => (
-              <option key={url} value={url}>
-                {serverHost(url)}{url === serverUrl ? " (active)" : ""}
-              </option>
-            ))}
-          </select>
-        </label>
+          {/* The app's one popover select (as in Appearance and Members), not
+              a native <select>: that was the last OS-chrome dropdown here. */}
+          <div className="connection-recent-row">
+            <MenuSelect<string>
+              value={selectedRecent}
+              options={recent.map((url) => ({
+                value: url,
+                label: serverHost(url),
+                hint: url === activeUrl ? "Active" : undefined,
+              }))}
+              onSelect={(url) => {
+                setDraft(url);
+                setSaved(false);
+                setError(null);
+              }}
+              disabled={busy}
+              ariaLabel="Recent connections"
+              direction="down"
+              triggerClassName="role-field-trigger connection-recent-trigger"
+              menuClassName="connection-recent-menu"
+              triggerContent={
+                <span className="role-trigger-label">
+                  {selectedRecent ? serverHost(selectedRecent) : "Choose a recent server"}
+                  {selectedRecent && selectedRecent === activeUrl && (
+                    <span className="appearance-tag connection-active-tag">Active</span>
+                  )}
+                </span>
+              }
+            />
+            <button
+              type="button"
+              className="secondary sm"
+              disabled={busy}
+              onClick={() => {
+                setDraft("");
+                setSaved(false);
+                setError(null);
+                addressInput.current?.focus();
+              }}
+            >
+              Add server
+            </button>
+          </div>
+        </div>
       )}
-      <div className="update-actions">
-        <button
-          className="secondary sm"
-          disabled={busy}
-          onClick={() => {
-            setDraft("");
-            setSaved(false);
-            setError(null);
-            addressInput.current?.focus();
-          }}
-        >
-          Add server
-        </button>
-      </div>
       <label className="field">
         <span className="field-label">Server URL</span>
         <input
@@ -715,6 +735,7 @@ function ConnectionTab() {
       </label>
       <div className="update-actions">
         <button
+          type="button"
           className="primary sm"
           disabled={busy || !draft.trim() || normalizeServerUrl(draft) === serverUrl}
           onClick={() => void save()}

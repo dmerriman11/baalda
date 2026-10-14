@@ -6260,6 +6260,48 @@ button.secondary:disabled {
   font-weight: 500;
   color: var(--text-secondary);
 }
+/* Connection: the recent-server picker fills the row like the URL input under
+   it, with "Add server" aligned beside it. Hostnames keep their case (the
+   shared field trigger and role menu capitalize role names). */
+.connection-recent-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.connection-recent-row .role-select-wrap {
+  flex: 1;
+  min-width: 0;
+}
+.connection-recent-trigger {
+  width: 100%;
+  justify-content: space-between;
+  text-transform: none;
+}
+.connection-recent-trigger .role-trigger-label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.connection-recent-trigger:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.connection-active-tag {
+  margin: 0;
+}
+.context-menu.role-menu.connection-recent-menu {
+  min-width: 260px;
+}
+.context-menu.role-menu.connection-recent-menu li {
+  text-transform: none;
+}
+/* Actions line up with the fields' left edge, as on the Profile tab. */
+.connection-tab .update-actions {
+  padding: 0;
+}
 .field-hint {
   display: block;
   font-size: var(--fs-xs);

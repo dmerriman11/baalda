@@ -446,9 +446,9 @@ export async function loadDocDiff(
 }
 
 /**
- * Which of `docIds` have NO server-side content at all — no snapshot, no logged
- * update? One query for the whole set, so the vault channel can answer it once
- * per connect instead of probing per doc.
+ * Which of `docIds` are live NOTES with NO server-side content at all — no
+ * snapshot, no logged update? One query per chunk for the whole set, so the
+ * vault channel can answer it once per connect instead of probing per doc.
  *
  * Exists because of the 2026-08 bulk-register incident: a client can register
  * hundreds of notes and then fail to upload their bodies, leaving rows that look
@@ -456,55 +456,65 @@ export async function loadDocDiff(
  * client cannot tell "empty on the server" from "not backfilled yet" and waits
  * forever. Naming them on the `ready` frame lets the client seed them from disk.
  *
+ * Only live `notes` rows qualify. The caller passes the whole readable set,
+ * which also holds `files` ids (tree binaries: their bytes live in blobs, never
+ * in Yjs, so they are ALWAYS "empty" here). Counting them filled the cap on a
+ * vault with ~5k files and ~150 genuinely empty notes, and every connect named
+ * 2000+ ids the client could do nothing useful with. The `bootstrap` route's
+ * upload set already joined `notes`; this now agrees with it.
+ *
  * `cap` bounds the answer so one enormous vault can't make the frame unbounded;
  * `truncated` tells the client the list is partial and another pass is needed.
  *
- * Past the cap the answer is a RANDOM `cap`-sized sample, not the lowest ids.
- * It used to be `ORDER BY id LIMIT cap`, which named the same 2,000 docs on
- * every connect: when that window filled with docs the client can never push
- * (settled-empty files, permanent failures, notes whose file lives on another
- * device), every doc above it was starved of its heal for good. Sampling costs
- * the same one query per chunk, and a doc named twice is a no-op client-side.
+ * Past the cap the answer is the `cap` docs with the lowest `md5(id || rotation)`
+ * — deterministic, so repeated connects name the SAME set (a random sample made
+ * every connect name a different 2000 and the client re-seeded notes it had
+ * just settled), yet `rotation` defaults to the UTC day, so a window full of docs
+ * the client can never push (notes whose file lives on another device) gives way
+ * to the rest the next day instead of starving them forever, which is what the
+ * old `ORDER BY id LIMIT cap` did. The answer itself is sorted by id.
  */
 export async function listEmptyDocs(
   docIds: string[],
   db: Queryable = defaultPool,
   cap = 2000,
+  rotation: string = new Date().toISOString().slice(0, 10),
 ): Promise<{ empty: string[]; truncated: boolean }> {
   if (docIds.length === 0) return { empty: [], truncated: false };
 
   // Postgres takes a large text[] fine, but a single param holding every doc id
-  // in a 100k-note vault is a needlessly big bind — chunk it.
+  // in a 100k-note vault is a needlessly big bind — chunk it. Each chunk keeps
+  // its own lowest `cap + 1` keys, so the merge below is exact; every chunk is
+  // read (a later chunk may hold lower keys), which is at most five queries for
+  // a 100k-doc vault.
   const CHUNK = 20_000;
-  // Shuffled so that, when there are more empties than `cap`, which ones make
-  // the cut changes from one connect to the next (see above).
-  const order = [...docIds];
-  for (let i = order.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [order[i], order[j]] = [order[j], order[i]];
-  }
-  const found: string[] = [];
-  for (let i = 0; i < order.length; i += CHUNK) {
-    const { rows } = await db.query<{ id: string }>(
-      `SELECT d.id
-         FROM unnest($1::text[]) WITH ORDINALITY AS d(id, n)
+  const found: { id: string; k: string }[] = [];
+  for (let i = 0; i < docIds.length; i += CHUNK) {
+    const { rows } = await db.query<{ id: string; k: string }>(
+      `SELECT d.id, md5(d.id || ':' || $3) AS k
+         FROM unnest($1::text[]) AS d(id)
+         JOIN notes n ON n.id = d.id AND n.deleted_at IS NULL
         WHERE NOT EXISTS (SELECT 1 FROM doc_updates u WHERE u.doc_id = d.id)
           AND NOT EXISTS (SELECT 1 FROM doc_snapshots s WHERE s.doc_id = d.id)
-        ORDER BY d.n
+        ORDER BY k, d.id
         LIMIT $2`,
-      [order.slice(i, i + CHUNK), cap + 1],
+      [docIds.slice(i, i + CHUNK), cap + 1, rotation],
     );
-    for (const r of rows) found.push(r.id);
-    // Already over the cap — the rest of the chunks can only add to a list we
-    // are about to truncate anyway.
-    if (found.length > cap) break;
+    for (const r of rows) found.push(r);
   }
 
-  // The answer is sorted so the frame reads the same whatever order the chunks
-  // came back in — but trimmed BEFORE sorting: `found` is in shuffled order, so
-  // the cut is random, and sorting first would always drop the largest ids.
-  const truncated = found.length > cap;
-  const empty = (truncated ? found.slice(0, cap) : found).sort();
+  // Deduplicate (a caller may pass an id twice across chunks), cut by key, then
+  // sort the kept ids so the frame reads the same however the chunks fell.
+  const byId = new Map<string, string>();
+  for (const r of found) byId.set(r.id, r.k);
+  const ranked = [...byId].sort((a, b) =>
+    a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0,
+  );
+  const truncated = ranked.length > cap;
+  const empty = ranked
+    .slice(0, cap)
+    .map(([id]) => id)
+    .sort();
   return { empty, truncated };
 }
 

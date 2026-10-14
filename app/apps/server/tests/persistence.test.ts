@@ -11,6 +11,16 @@ import {
 } from "../src/yjs/persistence.js";
 import { pool } from "../src/db/pool.js";
 import { resetDb } from "./helpers/db.js";
+import {
+  seedFile,
+  seedMember,
+  seedNote,
+  seedOrg,
+  seedUser,
+  seedVault,
+  seedVaultGrant,
+} from "./helpers/seed.js";
+import { listReadableDocsInVault } from "../src/permissions/vault-docs.js";
 
 const DOC = "doc-persist-1";
 
@@ -435,11 +445,20 @@ describe("loadDocDiff (vault-channel backfill)", () => {
 // ── listEmptyDocs: the `ready.empty` hint ───────────────────────────────────
 
 describe("listEmptyDocs", () => {
+  let vault: string;
+  /** Live `notes` rows for `ids` — only notes can be named on `ready.empty`. */
+  const notes = async (ids: string[]) => {
+    for (const id of ids) await seedNote(vault, null, `${id}.md`, null, id);
+    return ids;
+  };
+
   beforeEach(async () => {
     await resetDb();
+    vault = await seedVault(await seedOrg("Empty Probe", "empty-probe"));
   });
 
   it("names docs with no updates and no snapshot, and only those", async () => {
+    await notes(["doc-with-updates", "doc-compacted", "doc-empty-1", "doc-empty-2"]);
     await seedDoc("has content", "doc-with-updates");
 
     const compacted = await seedDoc("compacted", "doc-compacted");
@@ -457,13 +476,51 @@ describe("listEmptyDocs", () => {
 
   it("never names a doc that wasn't asked about", async () => {
     // "doc-unasked" is empty too, but it is outside the caller's readable set.
+    await notes(["doc-empty-1", "doc-unasked"]);
     const res = await listEmptyDocs(["doc-empty-1"]);
     expect(res.empty).toEqual(["doc-empty-1"]);
     expect(res.empty).not.toContain("doc-unasked");
   });
 
+  it("never names a tree file, a deleted note or an unknown id — only live notes", async () => {
+    // Production: ~5.2k `files` ids in the readable set filled the 2,000 cap on
+    // every connect while only ~146 notes really lacked content.
+    await notes(["note-empty", "note-deleted"]);
+    await pool.query("UPDATE notes SET deleted_at = now() WHERE id = 'note-deleted'");
+    const fileIds = [];
+    for (let i = 0; i < 5; i++) fileIds.push(await seedFile(vault, null, `img-${i}.png`));
+
+    const res = await listEmptyDocs(["note-empty", "note-deleted", "no-such-row", ...fileIds]);
+    expect(res).toEqual({ empty: ["note-empty"], truncated: false });
+  });
+
+  it("over the channel's real readable set (notes + files) names only the empty notes", async () => {
+    const orgId = await seedOrg("Mixed Vault", "mixed-vault");
+    const owner = await seedUser("owner@empty-probe.test");
+    await seedMember(orgId, owner, "owner");
+    await seedVaultGrant(orgId, "edit");
+    const v = await seedVault(orgId);
+    const full = await seedNote(v, null, "Full.md", owner);
+    const emptyA = await seedNote(v, null, "A.md", owner);
+    const emptyB = await seedNote(v, null, "B.md", owner);
+    await seedDoc("body", full);
+    const files = [
+      await seedFile(v, null, "photo.png"),
+      await seedFile(v, null, "deck.pdf"),
+      await seedFile(v, null, "sheet.xlsx"),
+    ];
+
+    const readable = await listReadableDocsInVault(owner, v);
+    // The premise: the set the vault channel probes really does carry file ids.
+    for (const f of files) expect(readable.has(f)).toBe(true);
+
+    const res = await listEmptyDocs([...readable]);
+    expect(res).toEqual({ empty: [emptyA, emptyB].sort(), truncated: false });
+    for (const f of files) expect(res.empty).not.toContain(f);
+  });
+
   it("caps the list and reports truncation", async () => {
-    const ids = Array.from({ length: 10 }, (_, i) => `empty-${i}`);
+    const ids = await notes(Array.from({ length: 10 }, (_, i) => `empty-${i}`));
     const res = await listEmptyDocs(ids, pool, 4);
     expect(res.truncated).toBe(true);
     expect(res.empty.length).toBe(4);
@@ -471,13 +528,26 @@ describe("listEmptyDocs", () => {
     expect(res.empty).toEqual([...res.empty].sort());
   });
 
-  it("names a different sample past the cap, so no empty doc is starved forever", async () => {
+  it("past the cap names the SAME set on every connect, whatever the input order", async () => {
+    // A random sample named a different 2,000 on each connect, so clients
+    // re-seeded notes the server had already settled (88–98% `covered`).
+    const ids = await notes(Array.from({ length: 30 }, (_, i) => `empty-${String(i).padStart(2, "0")}`));
+    const first = await listEmptyDocs(ids, pool, 7, "2026-10-14");
+    expect(first.truncated).toBe(true);
+    expect(first.empty.length).toBe(7);
+    for (let i = 0; i < 5; i++) {
+      const shuffled = [...ids].sort(() => Math.random() - 0.5);
+      expect(await listEmptyDocs(shuffled, pool, 7, "2026-10-14")).toEqual(first);
+    }
+  });
+
+  it("rotates the window over days, so no empty note is starved forever", async () => {
     // The old `ORDER BY id LIMIT cap` answered the same lowest ids on every
-    // connect; a doc above that window was never named, however often asked.
-    const ids = Array.from({ length: 12 }, (_, i) => `empty-${String(i).padStart(2, "0")}`);
+    // connect forever; a doc above that window was never named.
+    const ids = await notes(Array.from({ length: 12 }, (_, i) => `empty-${String(i).padStart(2, "0")}`));
     const seen = new Set<string>();
-    for (let i = 0; i < 40 && seen.size < ids.length; i++) {
-      for (const id of (await listEmptyDocs(ids, pool, 3)).empty) seen.add(id);
+    for (let d = 1; d <= 60 && seen.size < ids.length; d++) {
+      for (const id of (await listEmptyDocs(ids, pool, 3, `day-${d}`)).empty) seen.add(id);
     }
     expect(seen.size).toBe(ids.length);
   });

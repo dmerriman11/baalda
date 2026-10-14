@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
@@ -26,6 +27,12 @@ pub struct AttachmentMeta {
     pub size: u64,
     /// Hex-encoded SHA-256 of the file contents.
     pub sha256: String,
+    /// Last-modified time in Unix milliseconds (0 when the OS won't say). The
+    /// sync layer holds back an upload while this is younger than its quiet
+    /// period: a file still being written must not be announced by a sha its
+    /// final bytes will not have.
+    #[serde(default)]
+    pub modified_ms: i64,
 }
 
 /// Size + mtime of one vault file, for the file card's header. Deliberately
@@ -335,7 +342,12 @@ fn hash_listing(
             rel.clone(),
             HashEntry { size, mtime_ns, sha256: sha.clone() },
         );
-        items.push(AttachmentMeta { rel_path: rel, size, sha256: sha });
+        items.push(AttachmentMeta {
+            rel_path: rel,
+            size,
+            sha256: sha,
+            modified_ms: mtime_ns / 1_000_000,
+        });
     }
     // A prune is just "the new map has fewer/other keys", so one comparison
     // covers both a vanished file and a re-hashed one.
@@ -538,6 +550,103 @@ fn method_of(method: &str) -> AppResult<reqwest::Method> {
         .map_err(|_| AppError::new(format!("invalid HTTP method: {method}")))
 }
 
+/// Prefix of the error an upload returns when the bytes it streamed are not
+/// the bytes the intent declared. The TS side matches on it (`attachments.ts
+/// isChangedDuringUpload`): transient, never `complete`d, rehashed next pass.
+pub const CHANGED_DURING_UPLOAD: &str = "file changed during upload";
+
+fn changed_error(rel: &str, why: &str) -> AppError {
+    AppError::new(format!("{CHANGED_DURING_UPLOAD}: {rel}: {why}"))
+}
+
+/// An `AsyncRead` that hashes and counts what passes through it and FAILS the
+/// read that would complete the body when the total length or (for a whole
+/// file) the sha256 differs from what was declared. Failing that last read is
+/// what aborts the request before the store sees a complete, wrong object; the
+/// reason is also recorded in `mismatch`, because a transport error does not
+/// carry it back out of `send()`.
+struct VerifyingReader<R> {
+    inner: R,
+    len: u64,
+    seen: u64,
+    hasher: Sha256,
+    expected_sha256: Option<String>,
+    mismatch: Arc<Mutex<Option<String>>>,
+    done: bool,
+}
+
+impl<R> VerifyingReader<R> {
+    fn new(
+        inner: R,
+        len: u64,
+        expected_sha256: Option<String>,
+        mismatch: Arc<Mutex<Option<String>>>,
+    ) -> Self {
+        Self {
+            inner,
+            len,
+            seen: 0,
+            hasher: Sha256::new(),
+            expected_sha256: expected_sha256.map(|s| s.to_ascii_lowercase()),
+            mismatch,
+            done: false,
+        }
+    }
+
+    fn fail(&mut self, why: String) -> std::io::Error {
+        *self.mismatch.lock().unwrap() = Some(why.clone());
+        std::io::Error::new(std::io::ErrorKind::InvalidData, why)
+    }
+
+    /// The end-of-body check: `None` when the bytes are what was declared.
+    fn verdict(&mut self) -> Option<String> {
+        if self.seen != self.len {
+            return Some(format!("sent {} of {} bytes", self.seen, self.len));
+        }
+        let want = self.expected_sha256.as_ref()?;
+        let got = format!("{:x}", self.hasher.clone().finalize());
+        (got != *want).then(|| format!("streamed sha256 {got}, intent declared {want}"))
+    }
+}
+
+impl<R: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for VerifyingReader<R> {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        use std::task::Poll;
+        let this = self.get_mut();
+        if this.done {
+            return Poll::Ready(Ok(()));
+        }
+        let before = buf.filled().len();
+        match std::pin::Pin::new(&mut this.inner).poll_read(cx, buf) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Ready(Ok(())) => {
+                let fresh = &buf.filled()[before..];
+                let eof = fresh.is_empty();
+                this.seen += fresh.len() as u64;
+                this.hasher.update(fresh);
+                // Judge on the read that completes the body (hyper may never
+                // poll past `content-length`), or at a premature EOF.
+                if eof || this.seen >= this.len {
+                    this.done = eof;
+                    if let Some(why) = this.verdict() {
+                        this.done = true;
+                        // An erroring read must hand back nothing (the
+                        // `AsyncRead` contract): the final chunk never leaves.
+                        buf.set_filled(before);
+                        return Poll::Ready(Err(this.fail(why)));
+                    }
+                }
+                Poll::Ready(Ok(()))
+            }
+        }
+    }
+}
+
 /// Stream a vault file (or one byte range of it) to `url`.
 ///
 /// READ scope is the whole vault, like `read_binary_file` — the sync layer only
@@ -555,11 +664,21 @@ pub async fn upload_file(
     method: &str,
     headers: &HashMap<String, String>,
     range: Option<ByteRange>,
+    expected_sha256: Option<&str>,
+    expected_size: Option<u64>,
 ) -> AppResult<UploadOutcome> {
     let abs = resolve_in_vault(vault, rel)?;
     let meta = std::fs::metadata(&abs)?;
     if !meta.is_file() {
         return Err(AppError::new("not a file"));
+    }
+    if let Some(want) = expected_size {
+        if meta.len() != want {
+            return Err(changed_error(
+                rel,
+                &format!("size is {} bytes, intent declared {want}", meta.len()),
+            ));
+        }
     }
     let (start, len) = match range {
         Some(r) => {
@@ -580,7 +699,16 @@ pub async fn upload_file(
     if start > 0 {
         file.seek(std::io::SeekFrom::Start(start)).await?;
     }
-    let body = reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(file.take(len)));
+    // Hash and count exactly what goes on the wire. The sha the intent declared
+    // came from a hash pass that may predate a writer (an AI agent still saving
+    // an image): streaming whatever is on disk NOW put truncated bytes in the
+    // store under the declared sha, and every other device's download failed
+    // its hash check forever. A whole-file upload is verified against that sha;
+    // a part is verified for length (its sha is not knowable here).
+    let mismatch: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let expect_sha = if range.is_none() { expected_sha256.map(str::to_owned) } else { None };
+    let reader = VerifyingReader::new(file.take(len), len, expect_sha, mismatch.clone());
+    let body = reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(reader));
 
     let mut req = client()?
         .request(method_of(method)?, url)
@@ -592,10 +720,14 @@ pub async fn upload_file(
         req = req.header(reqwest::header::CONTENT_LENGTH, len);
     }
 
-    let res = req
-        .send()
-        .await
-        .map_err(|e| AppError::new(format!("upload failed: {e}")))?;
+    let sent = req.send().await;
+    // The verifier fails the body stream, which aborts the request — but the
+    // server may still have answered (or the transport reports something
+    // generic), so the recorded mismatch is what decides, whatever came back.
+    if let Some(why) = mismatch.lock().unwrap().take() {
+        return Err(changed_error(rel, &why));
+    }
+    let res = sent.map_err(|e| AppError::new(format!("upload failed: {e}")))?;
     let status = res.status().as_u16();
     let etag = res
         .headers()
@@ -1024,6 +1156,8 @@ mod tests {
             "PUT",
             &headers,
             Some(ByteRange { start: 0, end: 65 }),
+            None,
+            None,
         ));
         assert!(err.is_err());
         // An escaping read path is refused by `resolve_in_vault` just the same.
@@ -1034,8 +1168,115 @@ mod tests {
             "PUT",
             &headers,
             None,
+            None,
+            None,
         ))
         .is_err());
+    }
+
+    /// Read everything a `VerifyingReader` yields, as the upload body would.
+    fn drain_verified(
+        bytes: &[u8],
+        len: u64,
+        sha: Option<&str>,
+    ) -> (std::io::Result<Vec<u8>>, Option<String>) {
+        let mismatch = Arc::new(Mutex::new(None));
+        let mut r = VerifyingReader::new(
+            tokio::io::AsyncReadExt::take(bytes, len),
+            len,
+            sha.map(str::to_owned),
+            mismatch.clone(),
+        );
+        let mut out = Vec::new();
+        let res = block_on(r.read_to_end(&mut out)).map(|_| out);
+        let why = mismatch.lock().unwrap().clone();
+        (res, why)
+    }
+
+    #[test]
+    fn verifying_reader_passes_the_declared_bytes() {
+        let bytes = vec![3u8; 200_000];
+        let sha = sha256_bytes(&bytes);
+        let (res, why) = drain_verified(&bytes, bytes.len() as u64, Some(&sha));
+        assert_eq!(res.unwrap(), bytes);
+        assert!(why.is_none());
+    }
+
+    /// The production bug: the intent declared the FINISHED file's sha and
+    /// size, but the bytes on disk at PUT time were a different image.
+    #[test]
+    fn verifying_reader_fails_when_the_bytes_are_not_the_declared_ones() {
+        let declared = vec![1u8; 4096];
+        let on_disk = vec![2u8; 4096];
+        let (res, why) =
+            drain_verified(&on_disk, 4096, Some(&sha256_bytes(&declared)));
+        assert!(res.is_err());
+        assert!(why.unwrap().contains("streamed sha256"));
+    }
+
+    /// A file truncated mid-upload ends early: the short body is refused.
+    #[test]
+    fn verifying_reader_fails_on_a_short_body() {
+        let bytes = vec![9u8; 100];
+        let (res, why) = drain_verified(&bytes, 150, None);
+        assert!(res.is_err());
+        assert!(why.unwrap().contains("sent 100 of 150"));
+    }
+
+    /// Before any network: a file whose size no longer matches the intent is
+    /// refused with the distinct error, and a matching size with the wrong
+    /// bytes fails the body and reports the same error (the URL never answers).
+    #[test]
+    fn upload_reports_a_file_changed_during_upload() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_binary_file(tmp.path(), "attachments/img.png", &[5u8; 64]).unwrap();
+        let headers = HashMap::new();
+        let declared = sha256_bytes(&[6u8; 64]);
+        let err = block_on(upload_file(
+            tmp.path(),
+            "attachments/img.png",
+            "http://127.0.0.1:9/never-reached",
+            "PUT",
+            &headers,
+            None,
+            Some(&declared),
+            Some(80),
+        ))
+        .unwrap_err();
+        assert!(err.to_string().starts_with(CHANGED_DURING_UPLOAD), "{err}");
+    }
+
+    /// Against a real local socket: the server reads the request, and the
+    /// upload of the wrong bytes comes back as the changed error, not a 200.
+    #[test]
+    fn upload_of_mismatched_bytes_never_reports_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_binary_file(tmp.path(), "attachments/img.png", &[5u8; 64]).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = sock.set_read_timeout(Some(Duration::from_millis(500)));
+                let _ = sock.read(&mut buf);
+                let _ = sock.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n");
+            }
+        });
+        let headers = HashMap::new();
+        let declared = sha256_bytes(&[6u8; 64]);
+        let res = block_on(upload_file(
+            tmp.path(),
+            "attachments/img.png",
+            &format!("http://{addr}/put"),
+            "PUT",
+            &headers,
+            None,
+            Some(&declared),
+            Some(64),
+        ));
+        let err = res.expect_err("mismatched bytes must not report success");
+        assert!(err.to_string().starts_with(CHANGED_DURING_UPLOAD), "{err}");
     }
 
     /// The client is built lazily on the FIRST transfer, and with

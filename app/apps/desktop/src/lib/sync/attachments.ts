@@ -92,6 +92,25 @@ export interface LocalAttachment {
   relPath: string;
   sha256: string;
   size?: number;
+  /** Last-modified time (Unix ms), from the same walk as the hash. */
+  modifiedMs?: number;
+}
+
+/**
+ * A binary modified this recently is still being written (an AI agent saving
+ * an image, a download in progress) and is not uploaded yet: its sha is of
+ * bytes that will not last. The pass leaves it queued and asks again after the
+ * quiet period.
+ */
+export const UPLOAD_QUIET_MS = 3_000;
+
+/** Rust's `attachments.rs CHANGED_DURING_UPLOAD`: the bytes streamed were not
+ *  the bytes the intent declared. Never completed; rehashed on a later pass. */
+export const CHANGED_DURING_UPLOAD = "file changed during upload";
+
+export function isChangedDuringUpload(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : typeof e === "string" ? e : "";
+  return msg.includes(CHANGED_DURING_UPLOAD);
 }
 
 /** Server attachment metadata (from `api.listVaultBlobs`). */
@@ -163,12 +182,40 @@ export function isUnderAttachments(relPath: string): boolean {
  * the authority, including the denied build dirs this side does not enumerate;
  * this filter is what keeps the pass from queueing work Rust will refuse.
  */
+/** Mirrors `DENIED_DIRS` in src-tauri/src/vault.rs (and `sync/inbound.ts`). */
+const TREE_DENIED_DIRS = ["node_modules", "dist", "build", "target", "vendor", "__pycache__", "venv"];
+
+/**
+ * Download failures retrying cannot fix while the server row stays the same:
+ * the bytes behind the row do not hash to the sha the listing names, or Rust
+ * refuses the path outright. Anything else (network, 5xx, 403) retries.
+ */
+export function isPermanentDownloadFailure(e: unknown): boolean {
+  const msg =
+    e instanceof Error
+      ? e.message
+      : typeof e === "string"
+        ? e
+        : typeof (e as { message?: unknown })?.message === "string"
+          ? (e as { message: string }).message
+          : String(e ?? "");
+  return (
+    /downloaded bytes hash to [0-9a-f]+, expected/i.test(msg) ||
+    /not a syncable binary file type/i.test(msg) ||
+    /invalid tree binary path/i.test(msg)
+  );
+}
+
 export function isSafeTreeBinaryRelPath(relPath: string): boolean {
   if (!relPath) return false;
   const parts = relPath.split(/[\\/]/);
   if (parts.length === 0) return false;
   if (!parts.every((seg) => seg !== "" && seg !== "." && seg !== ".." && !seg.startsWith(".")))
     return false;
+  // Rust's `ensure_tree_binary_rel` refuses these build dirs (`vault.rs
+  // DENIED_DIRS`). A row an older client registered there would otherwise be
+  // planned on every pass, presigned, refused by Rust and planned again.
+  if (parts.some((seg) => TREE_DENIED_DIRS.includes(seg))) return false;
   if (isNoteExt(relPath)) return false;
   // Another device's Office lock file (`~$Report.docx`, #265), registered by a
   // client that predates the ignore rule: never pulled onto this disk. Its row
@@ -819,6 +866,9 @@ export interface AttachmentSyncDeps {
     method: string;
     headers: Record<string, string>;
     range?: AttachmentRange;
+    /** The intent's sha256 (checked on a whole-file PUT) and size. */
+    expectedSha256?: string;
+    expectedSize?: number;
   }) => Promise<PutResult>;
   /** PUT bytes from the webview — the fallback when Rust can't (tests). */
   putBytes?: (input: {
@@ -1067,6 +1117,10 @@ export class AttachmentSync {
    */
   private readonly embedRefusedUntil = new Map<string, number>();
   private embedRefusalTimer: ReturnType<typeof setTimeout> | null = null;
+  /** One armed retry for files held back as still being written (or that
+   *  changed mid-upload). One timer for all of them, so a file that keeps
+   *  changing costs one pass per quiet period, never a tight loop. */
+  private settleTimer: ReturnType<typeof setTimeout> | null = null;
   /** The "your image could not be shared" toast, once per sync instance. */
   private embedRefusalNotified = false;
   /** The storage-full toast is raised at most once per sync instance. */
@@ -1124,6 +1178,13 @@ export class AttachmentSync {
   private readonly bases = new Map<string, string>();
   /** `files` ids already reported as restored this session (one notice each). */
   private readonly restoreNoticed = new Set<string>();
+  /**
+   * Blob id → sha of server rows whose download failed for good
+   * ({@link isPermanentDownloadFailure}). Skipped while the row still names the
+   * same sha; a re-upload (new sha) is tried again. Without it such a row was
+   * presigned and fetched on EVERY pass and never recorded a base.
+   */
+  private readonly undownloadable = new Map<string, string>();
 
   constructor(
     private readonly deps: AttachmentSyncDeps,
@@ -1381,6 +1442,15 @@ export class AttachmentSync {
     }, EMBED_REFUSAL_RETRY_MS);
   }
 
+  /** Ask again once the quiet period has passed (see {@link settleTimer}). */
+  private retryAfterSettle(): void {
+    if (this.settleTimer) return;
+    this.settleTimer = this.setTimeoutImpl(() => {
+      this.settleTimer = null;
+      if (this.current()) this.scheduleReconcile();
+    }, UPLOAD_QUIET_MS);
+  }
+
   /** Clear a plan refusal after billing refresh has confirmed an upgrade. */
   resetEntitlement(): void {
     this.legacyListingBlocked = false;
@@ -1495,6 +1565,7 @@ export class AttachmentSync {
     const downloads: ServerBlob[] = [];
     for (const b of toDownload) {
       if (this.attachmentSyncBlocked && b.relPath && !isUnderAttachments(b.relPath)) continue;
+      if (this.undownloadable.get(b.id) === b.sha256) continue;
       if (b.relPath && this.deps.isDeletePending?.(b.relPath)) {
         console.info(`[attachments] ${b.relPath} has a delete pending — not downloading it back`);
         continue;
@@ -1578,6 +1649,12 @@ export class AttachmentSync {
           this.setFileState(a.relPath, "queued");
           return;
         }
+        // Still being written: its sha describes bytes that will not last.
+        if (a.modifiedMs && Date.now() - a.modifiedMs < UPLOAD_QUIET_MS) {
+          this.setFileState(a.relPath, "queued");
+          this.retryAfterSettle();
+          return;
+        }
         this.setFileState(a.relPath, "syncing");
         try {
           if (await bytes.run(a.size ?? 0, () => this.uploadOne(a))) {
@@ -1608,6 +1685,15 @@ export class AttachmentSync {
               });
             }
             this.setFileState(a.relPath, "queued");
+            return;
+          }
+          if (isChangedDuringUpload(e)) {
+            // The file moved between the hash and the PUT. Nothing was
+            // completed, so no row or base exists for these bytes; Rust dropped
+            // the cached sha, and the next pass rehashes and tries again.
+            this.setFileState(a.relPath, "queued");
+            console.warn(`[attachments] ${a.relPath} changed during upload — retrying later`);
+            this.retryAfterSettle();
             return;
           }
           if (this.handleAttachmentSyncRequired(e)) return;
@@ -1709,7 +1795,15 @@ export class AttachmentSync {
           this.deps.onDownloadSettled?.("ok");
         } catch (e) {
           this.handleAttachmentSyncRequired(e);
-          console.error("[attachments] download failed", b.relPath, e);
+          if (isPermanentDownloadFailure(e)) {
+            this.undownloadable.set(b.id, b.sha256);
+            console.warn(
+              `[attachments] ${b.relPath} cannot be downloaded as listed — not retrying until the server's copy changes`,
+              e,
+            );
+          } else {
+            console.error("[attachments] download failed", b.relPath, e);
+          }
           // The dot stays `syncing` — like a failed upload, `error` is reserved
           // for a refusal retrying cannot fix, and the next pass tries again.
           settled++;
@@ -2170,6 +2264,11 @@ export class AttachmentSync {
           method: t.method,
           headers: t.headers,
           range: t.range,
+          // What the intent declared: Rust hashes and counts the streamed body
+          // against it and fails with CHANGED_DURING_UPLOAD instead of putting
+          // other bytes in the store under this sha (a part checks size only).
+          expectedSha256: a.sha256,
+          ...(a.size != null ? { expectedSize: a.size } : {}),
         });
       } catch (e) {
         if (!isMissingCommand(e) || !this.deps.putBytes) throw e;
@@ -2867,6 +2966,10 @@ export class AttachmentSync {
     if (this.embedRefusalTimer) {
       this.clearTimeoutImpl(this.embedRefusalTimer);
       this.embedRefusalTimer = null;
+    }
+    if (this.settleTimer) {
+      this.clearTimeoutImpl(this.settleTimer);
+      this.settleTimer = null;
     }
     // The text pass holds the same captured vaultId and must die with it.
     if (this.textTimer) {

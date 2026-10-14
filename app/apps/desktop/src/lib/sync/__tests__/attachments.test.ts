@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import {
   EMBED_REFUSAL_RETRY_MS,
   AttachmentSync,
+  CHANGED_DURING_UPLOAD,
+  UPLOAD_QUIET_MS,
   diffAttachments,
   isSafeAttachmentRelPath,
   mimeForPath,
@@ -1334,6 +1336,83 @@ describe("explicit missing-file recovery", () => {
   });
 });
 
+describe("bytes that change between the hash and the PUT", () => {
+  const PNG = "Media/chart.png";
+
+  it("a changed-during-upload PUT is never completed, records nothing, and the next pass rehashes and uploads", async () => {
+    let pass = 0;
+    const bases: Array<[string, string]> = [];
+    const remembered: string[] = [];
+    const putArgs: Array<{ expectedSha256?: string; expectedSize?: number }> = [];
+    const { deps, log } = makeTransport([{ relPath: PNG, bytes: new Uint8Array([1, 2, 3]) }], () => SINGLE_INTENT, {
+      filesWithBytes: async () => true,
+      localFileIds: async () => new Map([[PNG, "local-png"]]),
+      knownFileId: () => null,
+      registerFile: async ({ id }) => id,
+      rememberFileId: (relPath, id) => void remembered.push(`${relPath}=${id}`),
+      setFileBase: (docId, sha) => void bases.push([docId, sha]),
+    });
+    // The hash pass: the first saw a half-written file, the second the final one.
+    deps.listLocal = async () => [
+      { relPath: PNG, sha256: pass === 0 ? "sha-partial" : "sha-final", size: 3 },
+    ];
+    deps.putFile = async (input) => {
+      putArgs.push({ expectedSha256: input.expectedSha256, expectedSize: input.expectedSize });
+      if (pass === 0) {
+        throw new Error(`${CHANGED_DURING_UPLOAD}: ${PNG}: streamed sha256 abc, intent declared sha-partial`);
+      }
+      log.puts.push({ url: input.url, method: input.method, headers: input.headers, bytes: 3, via: "rust" });
+      return { status: 200, etag: null };
+    };
+    deps.completeUpload = async (url, body) => {
+      log.completes.push({ url, body });
+      return { file: { id: "local-png", docId: "local-png", folderId: null, path: PNG, status: "created" } };
+    };
+    const states: string[] = [];
+    deps.onFileStates = (m) => {
+      const st = m[PNG];
+      if (st) states.push(st);
+    };
+    const sync = new AttachmentSync(deps);
+
+    const first = await sync.reconcile();
+    expect(first.uploaded).toBe(0);
+    expect(putArgs[0]).toEqual({ expectedSha256: "sha-partial", expectedSize: 3 });
+    expect(log.completes).toEqual([]);
+    expect(bases).toEqual([]);
+    expect(remembered).toEqual([]);
+    expect(states).not.toContain("error");
+    expect(states[states.length - 1]).toBe("queued");
+
+    pass = 1;
+    const second = await sync.reconcile();
+    expect(second.uploaded).toBe(1);
+    expect(log.intents.map((i) => i.sha256)).toEqual(["sha-partial", "sha-final"]);
+    expect(putArgs[1]).toEqual({ expectedSha256: "sha-final", expectedSize: 3 });
+    expect(log.completes).toHaveLength(1);
+    expect(remembered).toEqual([`${PNG}=local-png`]);
+    sync.stop();
+  });
+
+  it("a file modified inside the quiet period is held back without an intent", async () => {
+    const { deps, log } = makeTransport([{ relPath: PNG, bytes: new Uint8Array([1]) }], () => SINGLE_INTENT);
+    deps.listLocal = async () => [{ relPath: PNG, sha256: "sha-now", size: 1, modifiedMs: Date.now() }];
+    const sync = new AttachmentSync(deps);
+    const res = await sync.reconcile();
+    expect(res.uploaded).toBe(0);
+    expect(log.intents).toEqual([]);
+    expect(log.puts).toEqual([]);
+
+    // Settled: the same file goes on the next pass.
+    deps.listLocal = async () => [
+      { relPath: PNG, sha256: "sha-now", size: 1, modifiedMs: Date.now() - UPLOAD_QUIET_MS - 1 },
+    ];
+    expect((await sync.reconcile()).uploaded).toBe(1);
+    expect(log.intents).toHaveLength(1);
+    sync.stop();
+  });
+});
+
 describe("one-step file upload (files-with-bytes)", () => {
   const PDF = "Docs/Report.pdf";
 
@@ -1443,5 +1522,71 @@ describe("one-step file upload (files-with-bytes)", () => {
 
     expect(rig.registers).toEqual([null]);
     expect(rig.registered).toEqual([]);
+  });
+});
+
+describe("tree binaries a download can never settle", () => {
+  it("never plans a tree binary under a build dir Rust refuses to write", () => {
+    const server: ServerBlob[] = [
+      { id: "b1", docId: "f1", relPath: "Tools/app/node_modules/pkg/logo.png", sha256: "s1" },
+      { id: "b2", docId: "f2", relPath: "Tools/app/build/report.pdf", sha256: "s2" },
+      { id: "b3", docId: "f3", relPath: "Tools/app/report.pdf", sha256: "s3" },
+    ];
+    expect(diffAttachments([], server).toDownload.map((b) => b.id)).toEqual(["b3"]);
+  });
+
+  it("downloads once, and a row whose bytes never match its sha is not fetched again", async () => {
+    const { deps, local } = makeDeps([], [
+      { id: "blob-bad", relPath: "Team/deck.pdf", bytes: new Uint8Array([1, 2]) },
+      { id: "blob-ok", relPath: "Team/sheet.pdf", bytes: new Uint8Array([3, 4]) },
+    ]);
+    const listServer = deps.listServer;
+    deps.listServer = async () =>
+      (await listServer()).map((b) => ({ ...b, docId: `doc-${b.id}` }));
+    const bases = new Map<string, string>();
+    const ids = new Map<string, string>();
+    deps.fileBase = (id) => bases.get(id) ?? null;
+    deps.setFileBase = (id, sha) => void bases.set(id, sha);
+    deps.knownFileId = (p) => ids.get(p) ?? null;
+    deps.rememberFileId = (p, id) => void ids.set(p, id);
+    let fetches = 0;
+    deps.writeTreeLocal = async (relPath, bytes) => {
+      if (relPath === "Team/deck.pdf") {
+        throw new Error("downloaded bytes hash to abc123, expected def456");
+      }
+      local.set(relPath, bytes);
+    };
+    const download = deps.downloadServer;
+    deps.downloadServer = async (id) => {
+      fetches++;
+      return download(id);
+    };
+    const sync = new AttachmentSync(deps);
+
+    expect(await sync.reconcile()).toEqual({ uploaded: 0, downloaded: 1 });
+    expect(fetches).toBe(2);
+    // The good one recorded its base, so pass 2 agrees with the server.
+    expect(bases.get("doc-blob-ok")).toBe("sha-3.4");
+    expect(ids.get("Team/sheet.pdf")).toBe("doc-blob-ok");
+
+    // Pass 2 plans nothing: no re-fetch of either file.
+    expect(await sync.reconcile()).toEqual({ uploaded: 0, downloaded: 0 });
+    expect(fetches).toBe(2);
+    expect(local.has("Team/deck.pdf")).toBe(false);
+  });
+
+  it("retries a transient download failure on the next pass", async () => {
+    const { deps, local } = makeDeps([], [
+      { id: "blob-1", relPath: "Team/deck.pdf", bytes: new Uint8Array([1]) },
+    ]);
+    let fail = true;
+    deps.writeTreeLocal = async (relPath, bytes) => {
+      if (fail) throw new Error("download failed: HTTP 503");
+      local.set(relPath, bytes);
+    };
+    const sync = new AttachmentSync(deps);
+    expect(await sync.reconcile()).toEqual({ uploaded: 0, downloaded: 0 });
+    fail = false;
+    expect(await sync.reconcile()).toEqual({ uploaded: 0, downloaded: 1 });
   });
 });

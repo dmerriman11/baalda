@@ -358,7 +358,7 @@ vi.mock("../syncManager", () => ({
 
 import type { SessionInfo } from "../../api";
 import * as ipc from "../../ipc";
-import { SyncManager } from "../docSession";
+import { REGISTRY_FRAME_PULL_MIN_GAP_MS, SyncManager } from "../docSession";
 import { vaultScopes, type SyncProgress } from "../vaultScope";
 
 function session(): SessionInfo {
@@ -1143,9 +1143,11 @@ describe("SyncManager — leftover CRDT history is reclaimed while idle", () => 
     prune.mockClear();
     storeHooks.open = OPEN_DOC;
 
-    // Two pulls a second apart: the second re-arms the same timer.
+    // Two frame-driven pulls, the second past the 2 s spacing a teammate's
+    // frame keeps after the last pull ended (so it runs on the 250ms path):
+    // the second pull re-arms the same sweep timer the first armed.
     engineHooks.opts!.onRegistryChanged?.();
-    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(REGISTRY_FRAME_PULL_MIN_GAP_MS);
     engineHooks.opts!.onRegistryChanged?.();
     await vi.advanceTimersByTimeAsync(300);
     expect(sm.hasPendingCrdtSweep()).toBe(true);
@@ -1747,15 +1749,48 @@ describe("SyncManager — structure changes made outside the app (#221)", () => 
     for (const n of oldNotes) fakeDisk.files.set(n.relPath.replace(/^Old/, "Archive"), textOf(n.docId));
 
     sm.handleLocalFilesChanged([{ path: "Old", kind: "tree", gone: true }]);
-    // A teammate's change arrives inside the window.
+    // A teammate's change arrives inside the window. Past the frame spacing,
+    // only the hold keeps its pull from running.
     engineHooks.opts!.onRegistryChanged?.();
-    await vi.advanceTimersByTimeAsync(600);
+    await vi.advanceTimersByTimeAsync(REGISTRY_FRAME_PULL_MIN_GAP_MS + 100);
     expect(fakeRegistry.pull).not.toHaveBeenCalled();
     sm.handleLocalFilesChanged([{ path: "Archive", kind: "tree", gone: false }]);
-    await drain();
+    // The drain fires ~2.5 s in, over half of drain()'s default budget; give
+    // its real digests enough turns on a slow runner.
+    await drain(30);
 
     expect(fakeRegistry.renamePath.mock.calls).toEqual([["Old", "Archive"]]);
     expect(fakeRegistry.pull).toHaveBeenCalled();
+  });
+
+  it("holds a registry frame's pull that comes due while the drain is still pairing the folder", async () => {
+    // The drain takes `goneFolders` the moment it starts and then awaits the
+    // tree listing and every note's hash. A frame whose pull comes due inside
+    // that window (the 2 s spacing pushes frames later) must still wait.
+    const sm = new SyncManager();
+    mapNotes([...oldNotes, ...others], ["Old", "Keep"]);
+    await live(sm);
+    fakeRegistry.pull.mockClear();
+    fakeDisk.dirs = new Set(["Archive", "Archive/sub"]);
+    for (const n of oldNotes) fakeDisk.files.set(n.relPath.replace(/^Old/, "Archive"), textOf(n.docId));
+
+    sm.handleLocalFilesChanged([{ path: "Old", kind: "tree", gone: true }]);
+    sm.handleLocalFilesChanged([{ path: "Archive", kind: "tree", gone: false }]);
+    // The grace window closes and the drain starts, with no real turn for its
+    // digests to finish…
+    await vi.advanceTimersByTimeAsync(2_600);
+    expect(fakeRegistry.renamePath).not.toHaveBeenCalled();
+    // …and a teammate's frame comes due right then.
+    engineHooks.opts!.onRegistryChanged?.();
+    await vi.advanceTimersByTimeAsync(REGISTRY_FRAME_PULL_MIN_GAP_MS);
+    expect(fakeRegistry.pull).not.toHaveBeenCalled();
+    await drain(30);
+
+    expect(fakeRegistry.renamePath.mock.calls).toEqual([["Old", "Archive"]]);
+    expect(fakeRegistry.pull).toHaveBeenCalled();
+    expect(fakeRegistry.pull.mock.invocationCallOrder[0]).toBeGreaterThan(
+      fakeRegistry.renamePath.mock.invocationCallOrder[0],
+    );
   });
 
   it("holds a registry frame's pull while a renamed NOTE is still inside its grace window", async () => {
@@ -1778,9 +1813,9 @@ describe("SyncManager — structure changes made outside the app (#221)", () => 
     ]);
     // Our own content push echoes back as a server frame inside the window.
     engineHooks.opts!.onRegistryChanged?.();
-    await vi.advanceTimersByTimeAsync(600);
+    await vi.advanceTimersByTimeAsync(REGISTRY_FRAME_PULL_MIN_GAP_MS + 100);
     expect(fakeRegistry.pull).not.toHaveBeenCalled();
-    await drain();
+    await drain(30);
 
     expect(fakeRegistry.renamePath.mock.calls).toEqual([["Old/a.md", "Old/a2.md"]]);
     expect(fakeRegistry.deletePath).not.toHaveBeenCalled();
@@ -2073,7 +2108,7 @@ describe("SyncManager — structure changes made outside the app (#221)", () => 
       expect(rows[0]).toMatchObject({ kind: "inbound-blocked", path: "X0.md", docId: "x0" });
       // Other work carries on: an ordinary pull still runs.
       engineHooks.opts!.onRegistryChanged?.();
-      await vi.advanceTimersByTimeAsync(600);
+      await vi.advanceTimersByTimeAsync(REGISTRY_FRAME_PULL_MIN_GAP_MS + 100);
       expect(fakeRegistry.pull).toHaveBeenCalled();
     });
 
@@ -2159,8 +2194,10 @@ describe("SyncManager — structure changes made outside the app (#221)", () => 
     sm.dismissClosedChangesNotice();
     expect(sm.structureNotice().closedAppChanges).toBe(false);
     // Later pulls in the same open never raise it again.
+    fakeRegistry.pull.mockClear();
     engineHooks.opts!.onRegistryChanged?.();
-    await vi.advanceTimersByTimeAsync(600);
+    await vi.advanceTimersByTimeAsync(REGISTRY_FRAME_PULL_MIN_GAP_MS + 100);
+    expect(fakeRegistry.pull).toHaveBeenCalled();
     expect(sm.structureNotice().closedAppChanges).toBe(false);
 
     // A fresh open re-evaluates; new files alone are not a structure change.

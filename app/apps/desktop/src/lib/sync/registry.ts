@@ -3810,13 +3810,33 @@ export class VaultRegistry {
    * "nothing new" pull.
    */
   pull(): Promise<boolean> {
+    // COLLAPSED as well as serialized: while one pull runs, every further
+    // request joins the ONE queued pull behind it rather than queueing its own.
+    // That queued pull has not started yet, so it still reads the server after
+    // every joined request was made — nothing a joiner asked about is missed.
+    // Before this, a slow full pull (an 11k-note vault's paged listing takes
+    // seconds) let each `registry` frame landing meanwhile queue another full
+    // pull, and the backlog never drained under steady churn.
+    if (this.queuedPull) return this.queuedPull;
     const run = this.pullChain.then(
-      () => this.pullOnce(),
-      () => this.pullOnce(),
+      () => {
+        this.queuedPull = null;
+        return this.pullOnce();
+      },
+      () => {
+        this.queuedPull = null;
+        return this.pullOnce();
+      },
     );
     this.pullChain = run.catch(() => false);
-    return this.trackRegistration(run);
+    const tracked = this.trackRegistration(run);
+    this.queuedPull = tracked;
+    return tracked;
   }
+
+  /** The pull queued behind the running one and not yet started; later
+   *  {@link pull} calls join it. Cleared the moment it starts. */
+  private queuedPull: Promise<boolean> | null = null;
 
   /**
    * Kick the folder + note listings for `vaultId` without awaiting them. Idempotent

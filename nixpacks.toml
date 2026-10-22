@@ -29,8 +29,12 @@ COREPACK_ENABLE_DOWNLOAD_PROMPT = "0"
 # Keep TypeScript available for `pnpm run build` even with NODE_ENV=production.
 NPM_CONFIG_PRODUCTION = "false"
 
+# Dokploy's Nixpacks 1.41.0 defaults to a nixpkgs pin that has no nodejs_22.
+# This is the archive that release uses for Node 22, and corepack is a
+# separate package there (the nodejs build does not ship the binary).
 [phases.setup]
-nixPkgs = ["nodejs_22"]
+nixpkgsArchive = "e6f23dc08d3624daab7094b701aa3954923c6bbb"
+nixPkgs = ["nodejs_22", "corepack_22"]
 cmds = [
   "corepack enable",
   "cd app && corepack install",

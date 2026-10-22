@@ -2,7 +2,7 @@
 
 The server (`app/apps/server`) is a self-hostable Node + Postgres service: a Hono
 HTTP API and the Hocuspocus sync WebSocket, both served on a single public port.
-This guide covers running it with plain Docker and deploying it to Railway.
+This guide covers running it with plain Docker and deploying it to Railway, Coolify, or Dokploy.
 Everything here is optional. The desktop app works fully offline with no server
 at all, and you can always use the managed backend from [baalda.com](https://baalda.com)
 instead of self-hosting: set the server URL in Settings to `https://api.baalda.com`.
@@ -320,6 +320,41 @@ desktop app signing in and syncing through it.
 
 Full walkthrough and the differences from `deploy/compose`:
 [`deploy/coolify/README.md`](../deploy/coolify/README.md).
+
+## Option D: Dokploy
+
+[`nixpacks.toml`](../nixpacks.toml) is the Dokploy build. It follows the same
+contract as [`railway.json`](../railway.json): Node 22, the server workspace
+only, a production `pnpm deploy` bundle, migrations before listen, and
+`/health`. Dokploy's Nixpacks builder reads that file from the repository
+root. Leave the build path at `/`.
+
+1. In the same Dokploy project, create a **Postgres** database and copy its
+   internal connection URL.
+2. Create an **Application** from this repository (or your fork). Build type
+   **Nixpacks**. Build path **`/`**.
+3. Environment:
+   - `DATABASE_URL`: the internal Postgres URL from step 1.
+   - `JWT_SECRET`: `openssl rand -base64 32`. The server refuses to start in
+     production with a missing or placeholder secret.
+   - `BETTER_AUTH_URL`: the public `https://` URL you assign in step 4, with
+     no trailing slash and no port.
+4. Generate a domain and set its container port to **3010**. The image sets
+   `PORT=3010`. A domain aimed at 8080 (Railway's template port) will show
+   the container as up while the desktop cannot connect.
+5. Health check path: **`/health`**. The start command applies migrations
+   before the process listens, so give the first deploy a few minutes. A
+   failed migration exits non-zero and the new process never serves traffic.
+6. Set the container memory limit to **1024 MB**. The image caps the V8 heap
+   at 512 MB, matching the Dockerfile.
+
+`BAALDA_DEPLOYMENT=self-hosted` is set in the image, so the Assistant is
+available without Polar. Billing stays off until you add the Polar variables
+from [Environment variables](#environment-variables). The sync WebSocket is
+`/sync` on the same port.
+
+Open `https://<your-domain>/health`, then point the desktop app at that
+origin. See [Point the desktop app at your server](#point-the-desktop-app-at-your-server).
 
 ## A staging instance
 

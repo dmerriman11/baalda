@@ -1,0 +1,58 @@
+# Dokploy build for the Baalda server.
+#
+# Counterpart of the repo-root railway.json (and app/.railway/railway.ts).
+# Railway builds app/apps/server/Dockerfile from the repository root, then runs
+# `node dist/db/migrate.js` before the new container takes traffic and checks
+# `/health`. Dokploy has no pre-deploy hook, so this plan builds the same
+# pnpm-workspace bundle and migrates in the start command before the process
+# listens. Migrations take a Postgres advisory lock, so a restart during a
+# running migration waits and then finds the schema already applied.
+#
+# Dokploy application settings that this file cannot express:
+#   Build type: Nixpacks
+#   Build path: /          (repository root — this file must be the app root)
+#   Port:       3010       (the server default; do not point the domain at 8080)
+#   Health:     /health    (allow a few minutes on first boot for migrations)
+#   Memory:     1024 MB    (railway.json's container cap; the heap is 512 MB)
+#
+# Required runtime env (Dokploy → Environment): DATABASE_URL, JWT_SECRET,
+# BETTER_AUTH_URL. See docs/DEPLOY.md.
+
+[variables]
+NODE_ENV = "production"
+PORT = "3010"
+NODE_OPTIONS = "--max-old-space-size=512"
+# Self-hosted Assistant access. Override with cloud only when billing is on.
+BAALDA_DEPLOYMENT = "self-hosted"
+CI = "true"
+COREPACK_ENABLE_DOWNLOAD_PROMPT = "0"
+# Keep TypeScript available for `pnpm run build` even with NODE_ENV=production.
+NPM_CONFIG_PRODUCTION = "false"
+
+[phases.setup]
+nixPkgs = ["nodejs_22"]
+cmds = [
+  "corepack enable",
+  "cd app && corepack install",
+]
+
+[phases.install]
+dependsOn = ["setup"]
+cmds = [
+  "cd app && pnpm fetch",
+  "cd app && pnpm install --frozen-lockfile --offline --filter server",
+]
+cacheDirectories = ["/root/.local/share/pnpm/store"]
+
+# `pnpm deploy` omits gitignored dist/ when .git is present (Dokploy clones
+# the repo; the Docker build does not). Copy the compiled output, SQL
+# migrations, and the Assistant module in after the prod bundle is assembled.
+# The bundle is placed under /app so it survives into the runtime image.
+[phases.build]
+dependsOn = ["install"]
+cmds = [
+  "cd app && pnpm --filter server run build && pnpm --filter server --prod deploy --legacy /tmp/baalda-server && rm -rf /tmp/baalda-server/dist /tmp/baalda-server/migrations /tmp/baalda-server/housekeeper && cp -a apps/server/dist /tmp/baalda-server/dist && cp -a apps/server/migrations /tmp/baalda-server/migrations && cp -a apps/server/housekeeper /tmp/baalda-server/housekeeper && rm -rf /app/server-bundle && cp -a /tmp/baalda-server /app/server-bundle && test -f /app/server-bundle/dist/index.js && test -f /app/server-bundle/dist/db/migrate.js && test -f /app/server-bundle/housekeeper/index.mjs && ls /app/server-bundle/migrations/*.sql >/dev/null",
+]
+
+[start]
+cmd = "cd /app/server-bundle && node dist/db/migrate.js && exec node dist/index.js"
